@@ -10,7 +10,7 @@
         "CMAKE_CXX_FLAGS": "-DQT_QML_DEBUG"
       },
       "environment": {
-        "QML_DEBUG_ARGS": "-qmljsdebugger=file:{d77c563f-0aea-45cd-a1bd-a84e8b9bdaec},block"
+        "QML_DEBUG_ARGS": "-qmljsdebugger=file:{c5799864-935f-4202-9a6a-0400fc1016e8},block"
       }
     },
     {
@@ -52,7 +52,7 @@
   ],
   "vendor": {
     "qt-project.org/Presets": {
-      "checksum": "cU8/Hc1eiHYSRevgAmKnZ8btjhE="
+      "checksum": "8fPWYRq/N3fhc1rxg6ESHohOwGQ="
     }
   }
 }
