@@ -9,14 +9,23 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CXXBRIDGE_INCLUDE "../rust/target/cxxbridge/asphalt/src")
+include_directories("../rust/target/cxxbridge/asphalt/src")
+
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets)
+
+include_directories(${CXXBRIDGE_INCLUDE})
+
 
 set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         mainwindow.h
-        mainwindow.ui
+        chatview.h
+        chatview.cpp
+        mls_generate_credentials.h
+        mls_generate_credentials.cpp
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
@@ -41,7 +50,7 @@ else()
         )
     endif()
 endif()
-
+target_link_libraries(asphalt PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../rust/target/release/mlsffi.lib")
 target_link_libraries(asphalt PRIVATE Qt${QT_VERSION_MAJOR}::Widgets)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -68,3 +77,9 @@ install(TARGETS asphalt
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(asphalt)
 endif()
+
+add_custom_command(TARGET asphalt POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "../rust/target/release/mlsffi.dll"
+    $<TARGET_FILE_DIR:asphalt>
+)

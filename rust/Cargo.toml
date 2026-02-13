@@ -2,9 +2,13 @@
 name = "asphalt"
 version = "0.1.0"
 edition = "2024"
+
 [lib]
 name = "mlsffi"
-crate-type = ["cdylib"]
+crate-type = ["staticlib"] 
+
+[build-dependencies]
+cxx-build = "1.0"
 
 [dependencies]
 cxx = "1.0.194"

@@ -262,6 +262,7 @@ name = "asphalt"
 version = "0.1.0"
 dependencies = [
  "cxx",
+ "cxx-build",
  "eframe",
  "openmls",
  "openmls_basic_credential",

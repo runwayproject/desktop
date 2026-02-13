@@ -3,11 +3,7 @@
 
 #include <QMainWindow>
 
-QT_BEGIN_NAMESPACE
-namespace Ui {
-class MainWindow;
-}
-QT_END_NAMESPACE
+class ChatView;
 
 class MainWindow : public QMainWindow
 {
@@ -18,6 +14,7 @@ public:
     ~MainWindow();
 
 private:
-    Ui::MainWindow *ui;
+    ChatView *m_chatView;
 };
+
 #endif // MAINWINDOW_H
