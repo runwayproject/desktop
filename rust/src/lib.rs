@@ -1,3 +1,4 @@
+use openmls::prelude::tls_codec::Serialize;
 use openmls::prelude::{BasicCredential, CredentialWithKey, KeyPackage, OpenMlsRand};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -5,7 +6,13 @@ use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::Ciphersuite;
 use openmls_traits::types::SignatureScheme::ED25519;
 
-pub fn create_credentials_openmls() {
+#[cxx::bridge]
+mod ffi {
+    extern "Rust" {
+        fn create_credentials_openmls() -> Vec<u8>;
+    }
+}
+pub fn create_credentials_openmls() -> Vec<u8> {
     let provider = OpenMlsRustCrypto::default();
     let identity = provider.rand().random_vec(32).unwrap();
     let signer = SignatureKeyPair::new(ED25519).unwrap();
@@ -23,4 +30,6 @@ pub fn create_credentials_openmls() {
         "Created KeyPackage for identity (32 bytes). Public KeyPackage:\n{:#?}",
         key_package.key_package()
     );
+    let serialized = key_package.key_package().tls_serialize_detached().unwrap();
+    return serialized;
 }

@@ -1,2 +1,7 @@
 /target
 /.idea
+/cpp/.vs
+/cpp/.qtcreator
+/cpp/build
+/cpp/out
+/rust/target
