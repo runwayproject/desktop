@@ -1,2 +1,2 @@
 # Asphalt
-Asphalt is a client for the Runway protocol, written in Rust with egui. It utilizes OpenMLS for its MLS implementation.
+Asphalt is a client for the Runway protocol. It utilizes OpenMLS for its MLS implementation.
