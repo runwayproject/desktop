@@ -1,8 +1,6 @@
 use ratatui::{DefaultTerminal, Frame};
 use ratatui::crossterm::event::{self, Event};
 use std::io;
-mod mls;
-
 fn main() {
     let terminal = ratatui::init();
     let result = run(terminal);
