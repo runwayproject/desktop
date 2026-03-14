@@ -2,14 +2,15 @@ use anyhow::{Context, Result};
 use openmls::group::{MlsGroup, MlsGroupCreateConfig};
 use openmls::prelude::{
     BasicCredential, Capabilities, CredentialType, CredentialWithKey, Extension, ExtensionType,
-    Extensions, ExternalSender, KeyPackage, OpenMlsRand, SenderRatchetConfiguration,
-    UnknownExtension, Welcome,
+    Extensions, ExternalSender, KeyPackage, KeyPackageIn, OpenMlsRand, ProtocolVersion,
+    SenderRatchetConfiguration, UnknownExtension, Welcome,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::Ciphersuite;
 use openmls_traits::types::SignatureScheme::ED25519;
+use tls_codec::{Deserialize, DeserializeBytes};
 
 pub struct IdentityBundle {
     pub ciphersuite: Ciphersuite,
@@ -20,19 +21,25 @@ pub struct IdentityBundle {
 pub fn create_keypackage() {
     let identity_bundle = create_identity();
 
-    let key_package = KeyPackage::builder()
+    let key_package = build_keypackage(&identity_bundle).expect("Failed to build KeyPackage");
+
+    println!(
+        "Created KeyPackage for identity (32 bytes). Public KeyPackage:\n{:#?}",
+        key_package
+    );
+}
+
+pub fn build_keypackage(identity_bundle: &IdentityBundle) -> Result<KeyPackage> {
+    let key_package_bundle = KeyPackage::builder()
         .build(
             identity_bundle.ciphersuite,
             &identity_bundle.provider,
             &identity_bundle.signer,
             identity_bundle.credential_with_key.clone(),
         )
-        .expect("Failed to build KeyPackageBundle");
+        .context("building KeyPackage failed")?;
 
-    println!(
-        "Created KeyPackage for identity (32 bytes). Public KeyPackage:\n{:#?}",
-        key_package.key_package()
-    );
+    Ok(key_package_bundle.key_package().clone())
 }
 
 pub fn create_identity() -> IdentityBundle {
@@ -203,4 +210,40 @@ pub fn mls_message_out_to_protocol_message(
     let bytes = mls_message_out_to_bytes(msg)?;
     let pm = bytes_to_protocol_message(&bytes)?;
     Ok(pm)
+}
+
+pub fn keypackage_to_bytes(key_package: &KeyPackage) -> Result<Vec<u8>> {
+    let bytes = tls_codec::Serialize::tls_serialize_detached(key_package)
+        .context("serializing KeyPackage failed")?;
+    Ok(bytes)
+}
+
+pub fn bytes_to_keypackage(provider: &OpenMlsRustCrypto, bytes: &[u8]) -> Result<KeyPackage> {
+    let mut slice = bytes;
+    let kp_in = <KeyPackageIn as Deserialize>::tls_deserialize(&mut slice)
+        .context("deserializing KeyPackageIn failed")?;
+    if !slice.is_empty() {
+        return Err(anyhow::anyhow!("trailing bytes after KeyPackage"));
+    }
+
+    let key_package = kp_in
+        .validate(provider.crypto(), ProtocolVersion::default())
+        .context("validating KeyPackage failed")?;
+    Ok(key_package)
+}
+
+pub fn welcome_to_bytes(welcome: &Welcome) -> Result<Vec<u8>> {
+    let bytes = tls_codec::Serialize::tls_serialize_detached(welcome)
+        .context("serializing Welcome failed")?;
+    Ok(bytes)
+}
+
+pub fn bytes_to_welcome(bytes: &[u8]) -> Result<Welcome> {
+    let (welcome, rem) = <Welcome as DeserializeBytes>::tls_deserialize_bytes(bytes)
+        .context("deserializing Welcome failed")?;
+
+    if !rem.is_empty() {
+        return Err(anyhow::anyhow!("trailing bytes after Welcome"));
+    }
+    Ok(welcome)
 }

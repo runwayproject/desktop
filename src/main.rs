@@ -1,19 +1,13 @@
-use ratatui::{DefaultTerminal, Frame};
-use ratatui::crossterm::event::{self, Event};
-use std::io;
+use std::process;
+
+mod client_tui;
+
 fn main() {
-    let terminal = ratatui::init();
-    let result = run(terminal);
-    ratatui::restore();
-}
-fn run(mut terminal: DefaultTerminal) -> Result<(), io::Error> {
-    loop {
-        terminal.draw(render)?;
-        if matches!(event::read()?, Event::Key(_)) {
-            break Ok(());
-        }
+    let args: Vec<String> = std::env::args().collect();
+    let server_addr = args.get(1).map(String::as_str).unwrap_or("127.0.0.1:8999");
+    
+    if let Err(err) = client_tui::run_client_tui(server_addr) {
+        eprintln!("client tui failed: {err:#}");
+        process::exit(1);
     }
-}
-fn render(frame: &mut Frame) {
-    frame.render_widget("hello world", frame.area());
 }
