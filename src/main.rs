@@ -62,6 +62,16 @@ fn add_peer(
 }
 
 #[tauri::command]
+fn create_group(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, String> {
+    let mut client = state
+        .client
+        .lock()
+        .map_err(|_| "client state lock poisoned".to_string())?;
+    client.create_group().map_err(|err| err.to_string())?;
+    Ok(client.snapshot())
+}
+
+#[tauri::command]
 fn add_member(
     state: tauri::State<'_, AppState>,
     member_rid: String,
@@ -77,16 +87,16 @@ fn add_member(
 }
 
 #[tauri::command]
-fn select_peer(
+fn select_group(
     state: tauri::State<'_, AppState>,
-    peer_rid: String,
+    group_id: String,
 ) -> Result<ClientSnapshot, String> {
     let mut client = state
         .client
         .lock()
         .map_err(|_| "client state lock poisoned".to_string())?;
     client
-        .select_peer(peer_rid)
+        .select_group(group_id)
         .map_err(|err| err.to_string())?;
     Ok(client.snapshot())
 }
@@ -147,8 +157,9 @@ fn main() {
             fetch_messages,
             send_message,
             add_peer,
+            create_group,
             add_member,
-            select_peer,
+            select_group,
             accept_pending_offer,
             reject_pending_offer,
             clear_activity,

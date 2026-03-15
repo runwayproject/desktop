@@ -11,16 +11,17 @@ const elements = {
   rejectInviteButton: document.querySelector('#rejectInviteButton'),
   refreshButton: document.querySelector('#refreshButton'),
   peerList: document.querySelector('#peerList'),
-  activePeerTitle: document.querySelector('#activePeerTitle'),
+  activeGroupTitle: document.querySelector('#activeGroupTitle'),
   clearActivityButton: document.querySelector('#clearActivityButton'),
   activityList: document.querySelector('#activityList'),
   messageForm: document.querySelector('#messageForm'),
   messageInput: document.querySelector('#messageInput'),
   sendButton: document.querySelector('#sendButton'),
   ridValue: document.querySelector('#ridValue'),
-  addPeerForm: document.querySelector('#addPeerForm'),
-  peerRidInput: document.querySelector('#peerRidInput'),
+  createGroupButton: document.querySelector('#createGroupButton'),
+  toggleInviteButton: document.querySelector('#toggleInviteButton'),
   addMemberForm: document.querySelector('#addMemberForm'),
+  addMemberButton: document.querySelector('#addMemberButton'),
   memberRidInput: document.querySelector('#memberRidInput'),
   statusFacts: document.querySelector('#statusFacts'),
   toast: document.querySelector('#toast'),
@@ -30,6 +31,7 @@ const state = {
   snapshot: null,
   pollBusy: false,
   toastTimer: null,
+  inviteFormOpen: false,
 };
 
 function showToast(message) {
@@ -53,24 +55,33 @@ async function invokeCommand(command, args = {}) {
 }
 
 function renderPeers(snapshot) {
-  if (!snapshot.peers.length) {
+  if (!snapshot.conversations.length) {
     elements.peerList.className = 'peer-list empty-state';
-    elements.peerList.textContent = 'No conversations yet.';
+    elements.peerList.textContent = 'No groups yet.';
     return;
   }
 
   elements.peerList.className = 'peer-list';
   elements.peerList.innerHTML = '';
 
-  snapshot.peers.forEach((peerRid) => {
+  snapshot.conversations.forEach((conversation) => {
     const button = document.createElement('button');
     button.className = 'peer-pill';
-    if (snapshot.activePeer === peerRid) {
+    if (snapshot.activeGroupId === conversation.groupId) {
       button.classList.add('active');
     }
-    button.textContent = peerRid;
+
+    const title = document.createElement('span');
+    title.className = 'peer-pill-title';
+    title.textContent = conversation.title;
+
+    const meta = document.createElement('span');
+    meta.className = 'peer-pill-meta';
+    meta.textContent = `${conversation.groupId.slice(0, 8)} · ${conversation.memberCount} member${conversation.memberCount === 1 ? '' : 's'}`;
+
+    button.append(title, meta);
     button.addEventListener('click', () => {
-      void invokeCommand('select_peer', { peerRid });
+      void invokeCommand('select_group', { groupId: conversation.groupId });
     });
     elements.peerList.append(button);
   });
@@ -98,7 +109,7 @@ function renderActivity(snapshot) {
 
 function renderStatus(snapshot) {
   elements.connectionSummary.textContent = `${snapshot.myRid}@${snapshot.serverAddr}`;
-  elements.activePeerTitle.textContent = snapshot.activePeer ?? 'No peer selected';
+  elements.activeGroupTitle.textContent = snapshot.activeGroupTitle;
   elements.ridValue.textContent = snapshot.myRid;
 
   elements.inviteBar.hidden = !snapshot.pendingOfferFrom;
@@ -108,9 +119,10 @@ function renderStatus(snapshot) {
 
   const facts = [
     ['Server', snapshot.serverAddr],
-    ['Known peers', String(snapshot.peers.length)],
+    ['Known groups', String(snapshot.conversations.length)],
+    ['Active group', snapshot.activeGroupId ? snapshot.activeGroupId.slice(0, 8) : 'none'],
     ['Pending offer', snapshot.pendingOfferFrom ?? 'none'],
-    ['Ready to send', snapshot.activePeer ? 'yes' : 'select a peer'],
+    ['Ready to send', snapshot.activeGroupId ? 'yes' : 'select a group'],
   ];
 
   elements.statusFacts.innerHTML = '';
@@ -130,7 +142,16 @@ function renderStatus(snapshot) {
     elements.statusFacts.append(row);
   });
 
-  elements.sendButton.disabled = !snapshot.activePeer;
+  elements.sendButton.disabled = !snapshot.activeGroupId;
+  elements.addMemberButton.disabled = !snapshot.activeGroupId;
+  elements.memberRidInput.disabled = !snapshot.activeGroupId;
+  elements.toggleInviteButton.disabled = !snapshot.activeGroupId;
+
+  if (!snapshot.activeGroupId) {
+    state.inviteFormOpen = false;
+  }
+
+  elements.addMemberForm.classList.toggle('hidden', !state.inviteFormOpen);
 }
 
 function render() {
@@ -157,7 +178,7 @@ function renderMembers(snapshot) {
   snapshot.members.forEach((m) => {
     const div = document.createElement('div');
     div.className = 'member-item';
-    div.textContent = m;
+    div.textContent = m === snapshot.myRid ? `${m} (you)` : m;
     el.append(div);
   });
 }
@@ -192,16 +213,21 @@ elements.rejectInviteButton.addEventListener('click', () => {
   void invokeCommand('reject_pending_offer');
 });
 
-elements.addPeerForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const targetRid = elements.peerRidInput.value.trim();
-  if (!targetRid) {
-    showToast('Enter a peer RID first.');
+elements.createGroupButton.addEventListener('click', async () => {
+  await invokeCommand('create_group');
+});
+
+elements.toggleInviteButton.addEventListener('click', () => {
+  if (!state.snapshot?.activeGroupId) {
+    showToast('Select a group first.');
     return;
   }
 
-  await invokeCommand('add_peer', { targetRid });
-  elements.peerRidInput.value = '';
+  state.inviteFormOpen = !state.inviteFormOpen;
+  elements.addMemberForm.classList.toggle('hidden', !state.inviteFormOpen);
+  if (state.inviteFormOpen) {
+    elements.memberRidInput.focus();
+  }
 });
 
 elements.addMemberForm.addEventListener('submit', async (event) => {
@@ -214,6 +240,8 @@ elements.addMemberForm.addEventListener('submit', async (event) => {
 
   await invokeCommand('add_member', { memberRid });
   elements.memberRidInput.value = '';
+  state.inviteFormOpen = false;
+  elements.addMemberForm.classList.add('hidden');
 });
 
 elements.messageForm.addEventListener('submit', async (event) => {

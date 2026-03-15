@@ -9,6 +9,7 @@ use openmls::prelude::{KeyPackage, MlsGroupJoinConfig, ProcessedMessageContent};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::net::TcpStream;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,7 +27,15 @@ pub struct ClientState {
     pending_keypackages: HashMap<String, KeyPackage>,
     pending_group_additions: HashMap<String, String>,
     pending_offer_from: Option<String>,
-    active_peer: Option<String>,
+    active_group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub group_id: String,
+    pub title: String,
+    pub member_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,9 +43,10 @@ pub struct ClientState {
 pub struct ClientSnapshot {
     pub server_addr: String,
     pub my_rid: String,
-    pub active_peer: Option<String>,
+    pub active_group_id: Option<String>,
+    pub active_group_title: String,
     pub pending_offer_from: Option<String>,
-    pub peers: Vec<String>,
+    pub conversations: Vec<ConversationSummary>,
     pub activity: Vec<String>,
     pub members: Vec<String>,
 }
@@ -66,7 +76,7 @@ impl ClientState {
             pending_keypackages: HashMap::new(),
             pending_group_additions: HashMap::new(),
             pending_offer_from: None,
-            active_peer: None,
+            active_group_id: None,
         };
 
         state.log("Connected to relay.");
@@ -74,7 +84,7 @@ impl ClientState {
     }
 
     pub fn snapshot(&self) -> ClientSnapshot {
-        let members = match &self.active_peer {
+        let members = match &self.active_group_id {
             Some(active) => self
                 .conversation_members
                 .get(active)
@@ -83,15 +93,36 @@ impl ClientState {
             None => Vec::new(),
         };
 
+        let active_group_title = self
+            .active_group_id
+            .as_ref()
+            .map(|group_id| self.conversation_title(group_id))
+            .unwrap_or_else(|| "No group selected".to_string());
+
         ClientSnapshot {
             server_addr: self.server_addr.clone(),
             my_rid: self.my_rid.clone(),
-            active_peer: self.active_peer.clone(),
+            active_group_id: self.active_group_id.clone(),
+            active_group_title,
             pending_offer_from: self.pending_offer_from.clone(),
-            peers: self.sorted_peers(),
+            conversations: self.sorted_conversations(),
             activity: self.activity.iter().cloned().collect(),
             members,
         }
+    }
+
+    pub fn create_group(&mut self) -> Result<()> {
+        let group_id = self.allocate_group_id();
+        let group = mls::create_group(&self.identity);
+        self.conversations.insert(group_id.clone(), group);
+        self.conversation_members
+            .insert(group_id.clone(), vec![self.my_rid.clone()]);
+        self.active_group_id = Some(group_id.clone());
+        self.log(format!(
+            "Created group {}. Invite members from the Groups view.",
+            short_group_id(&group_id)
+        ));
+        Ok(())
     }
 
     pub fn add_peer(&mut self, target_rid: String) -> Result<()> {
@@ -122,14 +153,18 @@ impl ClientState {
         }
 
         let active = self
-            .active_peer
+            .active_group_id
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("no active conversation selected"))?;
+            .ok_or_else(|| anyhow::anyhow!("no active group selected"))?;
 
         if let Some(members) = self.conversation_members.get(&active)
             && members.contains(&member_rid)
         {
-            bail!("{} is already a member of {}", member_rid, active)
+            bail!(
+                "{} is already a member of group {}",
+                member_rid,
+                short_group_id(&active)
+            )
         }
 
         let maybe_kp = self.pending_keypackages.remove(&member_rid);
@@ -148,8 +183,9 @@ impl ClientState {
 
                 self.send_bootstrap_envelope(envelope, member_rid.clone())?;
                 self.log(format!(
-                    "Requested a KeyPackage from {} for conversation {}. The member will be added when it arrives.",
-                    member_rid, active
+                    "Requested a KeyPackage from {} for group {}. The member will be added when it arrives.",
+                    member_rid,
+                    short_group_id(&active)
                 ));
                 return Ok(());
             }
@@ -160,21 +196,21 @@ impl ClientState {
 
     fn finalize_add_member(
         &mut self,
-        active: String,
+        group_id: String,
         member_rid: String,
         key_package: KeyPackage,
     ) -> Result<()> {
         let current_members = self
             .conversation_members
-            .get(&active)
+            .get(&group_id)
             .cloned()
             .unwrap_or_else(|| vec![self.my_rid.clone()]);
 
         let (commit, welcome, ratchet_tree) = {
             let group = self
                 .conversations
-                .get_mut(&active)
-                .with_context(|| format!("no group for active conversation {}", active))?;
+                .get_mut(&group_id)
+                .with_context(|| format!("no local group for {}", short_group_id(&group_id)))?;
 
             let (commit, welcome) = mls::add_members_and_get_commit(
                 group,
@@ -196,6 +232,7 @@ impl ClientState {
             magic: BOOTSTRAP_MAGIC,
             payload: BootstrapPayload::Welcome {
                 from_rid: self.my_rid.clone(),
+                group_id: group_id.clone(),
                 members: updated_members.clone(),
                 ratchet_tree,
                 welcome: welcome_bytes,
@@ -217,6 +254,7 @@ impl ClientState {
                 magic: BOOTSTRAP_MAGIC,
                 payload: BootstrapPayload::GroupCommit {
                     from_rid: self.my_rid.clone(),
+                    group_id: group_id.clone(),
                     added_rid: Some(member_rid.clone()),
                     commit: commit_bytes.clone(),
                 },
@@ -225,22 +263,23 @@ impl ClientState {
         }
 
         self.conversation_members
-            .insert(active.clone(), updated_members);
+            .insert(group_id.clone(), updated_members);
 
         self.log(format!(
-            "Added {} to conversation {} and sent Welcome.",
-            member_rid, active
+            "Added {} to group {} and sent Welcome.",
+            member_rid,
+            short_group_id(&group_id)
         ));
         Ok(())
     }
 
-    pub fn select_peer(&mut self, peer_rid: String) -> Result<()> {
-        if !self.conversations.contains_key(&peer_rid) {
-            bail!("unknown peer {peer_rid}")
+    pub fn select_group(&mut self, group_id: String) -> Result<()> {
+        if !self.conversations.contains_key(&group_id) {
+            bail!("unknown group {group_id}")
         }
 
-        self.active_peer = Some(peer_rid.clone());
-        self.log(format!("Active peer: {}", peer_rid));
+        self.active_group_id = Some(group_id.clone());
+        self.log(format!("Active group: {}", short_group_id(&group_id)));
         Ok(())
     }
 
@@ -270,12 +309,15 @@ impl ClientState {
             return Ok(());
         }
 
-        let target = self.active_peer.clone().ok_or_else(|| {
-            anyhow::anyhow!("no active peer. Add a peer first and complete the invite handshake")
+        let target = self.active_group_id.clone().ok_or_else(|| {
+            anyhow::anyhow!("no active group. Create a group first or accept an invite")
         })?;
 
         let group = self.conversations.get_mut(&target).with_context(|| {
-            format!("active peer {} has no established MLS conversation", target)
+            format!(
+                "active group {} has no established MLS conversation",
+                target
+            )
         })?;
 
         let out = mls::send_application_message(
@@ -319,7 +361,12 @@ impl ClientState {
         }
 
         if !delivered.is_empty() {
-            self.log(format!("You -> [{}]: {}", delivered.join(", "), clean));
+            self.log(format!(
+                "You -> group {} [{}]: {}",
+                short_group_id(&target),
+                delivered.join(", "),
+                clean
+            ));
         }
 
         Ok(())
@@ -359,27 +406,32 @@ impl ClientState {
         Ok(())
     }
 
-    fn sorted_peers(&self) -> Vec<String> {
-        let mut peers = self.conversations.keys().cloned().collect::<Vec<_>>();
-        peers.sort();
-        peers
+    fn sorted_conversations(&self) -> Vec<ConversationSummary> {
+        let mut conversations = self
+            .conversations
+            .keys()
+            .cloned()
+            .map(|group_id| ConversationSummary {
+                title: self.conversation_title(&group_id),
+                member_count: self
+                    .conversation_members
+                    .get(&group_id)
+                    .map(|members| members.len())
+                    .unwrap_or(0),
+                group_id,
+            })
+            .collect::<Vec<_>>();
+        conversations.sort_by(|left, right| left.title.cmp(&right.title));
+        conversations
     }
 
     fn create_invite_for_target(&mut self, target: String) -> Result<()> {
-        if self.conversations.contains_key(&target) {
-            self.active_peer = Some(target.clone());
-            self.log(format!(
-                "Conversation with {} already exists. Selected as active.",
-                target
-            ));
-            return Ok(());
-        }
-
         let key_package = self
             .pending_keypackages
             .remove(&target)
             .with_context(|| format!("no pending KeyPackage from {}", target))?;
 
+        let group_id = self.allocate_group_id();
         let mut group = mls::create_group(&self.identity);
         let welcome = mls::create_welcome_message(
             &mut group,
@@ -394,6 +446,7 @@ impl ClientState {
             magic: BOOTSTRAP_MAGIC,
             payload: BootstrapPayload::Welcome {
                 from_rid: self.my_rid.clone(),
+                group_id: group_id.clone(),
                 members: vec![self.my_rid.clone(), target.clone()],
                 ratchet_tree,
                 welcome: welcome_bytes,
@@ -401,12 +454,13 @@ impl ClientState {
         };
 
         self.send_bootstrap_envelope(envelope, target.clone())?;
-        self.conversations.insert(target.clone(), group);
+        self.conversations.insert(group_id.clone(), group);
         self.conversation_members
-            .insert(target.clone(), vec![self.my_rid.clone(), target.clone()]);
-        self.active_peer = Some(target.clone());
+            .insert(group_id.clone(), vec![self.my_rid.clone(), target.clone()]);
+        self.active_group_id = Some(group_id.clone());
         self.log(format!(
-            "Invite sent to {}. Waiting for them to join.",
+            "Created group {} and invited {}.",
+            short_group_id(&group_id),
             target
         ));
         Ok(())
@@ -421,7 +475,7 @@ impl ClientState {
         }
 
         let mut decrypted_line: Option<(String, String)> = None;
-        for (peer_rid, group) in &mut self.conversations {
+        for (group_id, group) in &mut self.conversations {
             let pm = match mls::bytes_to_protocol_message(&blob.ciphertext) {
                 Ok(pm) => pm,
                 Err(_) => continue,
@@ -439,16 +493,16 @@ impl ClientState {
                 _ => "non-application MLS message".to_string(),
             };
 
-            decrypted_line = Some((peer_rid.clone(), text));
+            decrypted_line = Some((group_id.clone(), text));
             break;
         }
 
-        if let Some((peer, line)) = decrypted_line {
-            self.active_peer = Some(peer.clone());
-            self.log(format!("{} -> you: {}", peer, line));
+        if let Some((group_id, line)) = decrypted_line {
+            self.active_group_id = Some(group_id.clone());
+            self.log(format!("[{}] {}", self.conversation_title(&group_id), line));
         } else {
             self.log(format!(
-                "Received {} bytes, but no local conversation could decrypt it.",
+                "Received {} bytes, but no local group could decrypt it.",
                 blob.ciphertext.len()
             ));
         }
@@ -480,11 +534,12 @@ impl ClientState {
                 key_package,
             } => {
                 let kp = mls::bytes_to_keypackage(&self.identity.provider, &key_package)?;
-                if let Some(conversation_key) = self.pending_group_additions.remove(&from_rid) {
-                    self.finalize_add_member(conversation_key.clone(), from_rid.clone(), kp)?;
+                if let Some(group_id) = self.pending_group_additions.remove(&from_rid) {
+                    self.finalize_add_member(group_id.clone(), from_rid.clone(), kp)?;
                     self.log(format!(
-                        "Received KeyPackage from {} and completed the add to conversation {}.",
-                        from_rid, conversation_key
+                        "Received KeyPackage from {} and completed the add to group {}.",
+                        from_rid,
+                        short_group_id(&group_id)
                     ));
                 } else {
                     self.pending_keypackages.insert(from_rid.clone(), kp);
@@ -497,6 +552,7 @@ impl ClientState {
             }
             BootstrapPayload::Welcome {
                 from_rid,
+                group_id,
                 members,
                 ratchet_tree,
                 welcome,
@@ -510,63 +566,94 @@ impl ClientState {
                     welcome,
                     Some(ratchet_tree),
                 )?;
-                self.conversations.insert(from_rid.clone(), group);
-                self.conversation_members.insert(from_rid.clone(), members);
-                self.active_peer = Some(from_rid.clone());
+                self.conversations.insert(group_id.clone(), group);
+                self.conversation_members.insert(group_id.clone(), members);
+                self.active_group_id = Some(group_id.clone());
                 self.log(format!(
-                    "Joined conversation with {}. You can now chat.",
+                    "Joined group {} from {}. You can now chat.",
+                    short_group_id(&group_id),
                     from_rid
                 ));
             }
             BootstrapPayload::GroupCommit {
                 from_rid,
+                group_id,
                 added_rid,
                 commit,
             } => {
                 let pm = mls::bytes_to_protocol_message(&commit)?;
-                let mut updated_conversation: Option<String> = None;
+                let updated_group = self
+                    .conversations
+                    .get_mut(&group_id)
+                    .with_context(|| format!("received commit for unknown group {}", group_id))?;
 
-                for (conversation_key, group) in &mut self.conversations {
-                    let processed =
-                        match mls::receive_message(group, &self.identity.provider, pm.clone()) {
-                            Ok(p) => p,
-                            Err(_) => continue,
-                        };
-
-                    if let ProcessedMessageContent::StagedCommitMessage(staged_commit) =
-                        processed.into_content()
-                    {
-                        mls::merge_staged_commit(group, &self.identity.provider, *staged_commit)?;
-                        updated_conversation = Some(conversation_key.clone());
-                        break;
-                    }
-                }
-
-                if let Some(conversation_key) = updated_conversation {
+                let processed = mls::receive_message(updated_group, &self.identity.provider, pm)?;
+                if let ProcessedMessageContent::StagedCommitMessage(staged_commit) =
+                    processed.into_content()
+                {
+                    mls::merge_staged_commit(
+                        updated_group,
+                        &self.identity.provider,
+                        *staged_commit,
+                    )?;
                     if let Some(added_rid) = added_rid {
                         let members = self
                             .conversation_members
-                            .entry(conversation_key.clone())
+                            .entry(group_id.clone())
                             .or_insert_with(|| vec![self.my_rid.clone()]);
                         if !members.contains(&added_rid) {
                             members.push(added_rid.clone());
                         }
                         self.log(format!(
-                            "{} added {} to conversation {}.",
-                            from_rid, added_rid, conversation_key
+                            "{} added {} to group {}.",
+                            from_rid,
+                            added_rid,
+                            short_group_id(&group_id)
                         ));
                     } else {
-                        self.log(format!("Processed group commit from {}.", from_rid));
+                        self.log(format!(
+                            "Processed group commit from {} for group {}.",
+                            from_rid,
+                            short_group_id(&group_id)
+                        ));
                     }
                 } else {
-                    self.log(format!(
-                        "Received a group commit from {}, but no local conversation matched it.",
-                        from_rid
-                    ));
+                    bail!("received non-commit MLS payload in GroupCommit envelope")
                 }
             }
         }
         Ok(())
+    }
+
+    fn allocate_group_id(&self) -> String {
+        loop {
+            let candidate = random_group_id();
+            if !self.conversations.contains_key(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    fn conversation_title(&self, group_id: &str) -> String {
+        let Some(members) = self.conversation_members.get(group_id) else {
+            return format!("Group {}", short_group_id(group_id));
+        };
+
+        let others = members
+            .iter()
+            .filter(|rid| rid.as_str() != self.my_rid.as_str())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if others.is_empty() {
+            return format!("Group {}", short_group_id(group_id));
+        }
+
+        if others.len() <= 2 {
+            return others.join(", ");
+        }
+
+        format!("{}, {} +{}", others[0], others[1], others.len() - 2)
     }
 
     fn send_bootstrap_envelope(
@@ -611,15 +698,32 @@ enum BootstrapPayload {
     },
     Welcome {
         from_rid: String,
+        group_id: String,
         members: Vec<String>,
         ratchet_tree: Vec<u8>,
         welcome: Vec<u8>,
     },
     GroupCommit {
         from_rid: String,
+        group_id: String,
         added_rid: Option<String>,
         commit: Vec<u8>,
     },
+}
+
+fn short_group_id(group_id: &str) -> String {
+    group_id.chars().take(8).collect()
+}
+
+fn random_group_id() -> String {
+    let mut bytes = [0_u8; 16];
+    rand::rng().fill(&mut bytes);
+
+    let mut id = String::with_capacity(32);
+    for byte in bytes {
+        let _ = write!(&mut id, "{:02x}", byte);
+    }
+    id
 }
 
 fn make_auth(signing_key: &SigningKey, action: &str, body: &[u8]) -> RequestAuth {

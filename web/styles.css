@@ -176,13 +176,41 @@ textarea {
 }
 
 .chat-peers-header {
-  padding: 7px 12px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: #888888;
+}
+
+.list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 12px;
   border-bottom: 1px solid #1a1a1a;
   flex-shrink: 0;
+}
+
+.panel-action {
+  background: none;
+  border: 1px solid #2a2a2a;
+  color: #7e7e7e;
+  font-size: 11px;
+  text-transform: none;
+  cursor: pointer;
+  padding: 2px 8px;
+}
+
+.panel-action:hover:not(:disabled) {
+  color: #ededed;
+  border-color: #4a4a4a;
+  background: #181818;
+}
+
+.panel-action:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .peer-list {
@@ -210,8 +238,25 @@ textarea {
   cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
   border-radius: 0;
+}
+
+.peer-pill-title,
+.peer-pill-meta {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peer-pill-title {
+  color: inherit;
+}
+
+.peer-pill-meta {
+  margin-top: 2px;
+  color: #5e5e5e;
+  font-size: 10px;
 }
 
 .peer-pill:hover {
@@ -244,13 +289,45 @@ textarea {
 }
 
 .chat-members-header {
-  padding: 7px 12px;
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.07em;
   color: #888888;
+}
+
+.members-invite-form {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
   border-bottom: 1px solid #1a1a1a;
-  flex-shrink: 0;
+  background: #101010;
+}
+
+.members-invite-form input {
+  flex: 1;
+  min-width: 0;
+  background: #0b0b0b;
+  border: 1px solid #242424;
+  color: #ededed;
+  padding: 6px 8px;
+  outline: none;
+}
+
+.members-invite-form input::placeholder {
+  color: #4a4a4a;
+}
+
+.members-invite-form button {
+  background: #151515;
+  border: 1px solid #2a2a2a;
+  color: #b0b0b0;
+  cursor: pointer;
+  padding: 6px 10px;
+}
+
+.members-invite-form button:hover {
+  background: #1b1b1b;
+  color: #ededed;
 }
 
 .members-list {

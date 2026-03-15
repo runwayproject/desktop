@@ -12,7 +12,6 @@
   <nav class="menubar">
     <span class="brand">Asphalt</span>
     <button class="nav-btn active" data-view="chat">Chat</button>
-    <button class="nav-btn" data-view="peers">Peers</button>
     <button class="nav-btn" data-view="identity">Identity</button>
     <div class="menubar-spacer"></div>
     <span id="connectionSummary" class="menubar-status">Connecting...</span>
@@ -30,41 +29,33 @@
   <div class="views">
     <div class="view" id="view-chat">
       <div class="chat-peers">
-        <div class="chat-peers-header">Conversations</div>
+        <div class="list-header">
+          <div class="chat-peers-header">Groups</div>
+          <button id="createGroupButton" class="panel-action" type="button">Create</button>
+        </div>
         <div id="peerList" class="peer-list"></div>
       </div>
       <div class="chat-main">
         <div class="chat-header">
-          <span id="activePeerTitle">No peer selected</span>
+          <span id="activeGroupTitle">No group selected</span>
           <button id="clearActivityButton" class="action-link">Clear</button>
         </div>
         <div id="activityList" class="activity-list empty-state">Messages and protocol events will appear here.</div>
         <form id="messageForm" class="composer">
-          <textarea id="messageInput" rows="3" placeholder="Message active peer..."></textarea>
+          <textarea id="messageInput" rows="3" placeholder="Message active group..."></textarea>
           <button id="sendButton" type="submit">Send</button>
         </form>
       </div>
       <div class="chat-members">
-        <div class="chat-members-header">Members</div>
-        <div id="membersList" class="members-list empty-state">No members</div>
-      </div>
-    </div>
-
-    <div class="view hidden" id="view-peers">
-      <div class="page-body">
-        <h2>Add Peer</h2>
-        <p class="muted">Send a KeyPackage to start an MLS session with a peer.</p>
-        <form id="addPeerForm" class="row-form">
-          <input id="peerRidInput" type="text" placeholder="Recipient RID" autocomplete="off" />
-          <button type="submit">Send KeyPackage</button>
-        </form>
-        <hr />
-        <h2>Add Member to Active Group</h2>
-        <p class="muted">Invite a new member (by RID) into the currently selected conversation.</p>
-        <form id="addMemberForm" class="row-form">
+        <div class="list-header">
+          <div class="chat-members-header">Members</div>
+          <button id="toggleInviteButton" class="panel-action" type="button">Invite</button>
+        </div>
+        <form id="addMemberForm" class="members-invite-form hidden">
           <input id="memberRidInput" type="text" placeholder="Member RID" autocomplete="off" />
-          <button type="submit">Invite</button>
+          <button id="addMemberButton" type="submit">Send</button>
         </form>
+        <div id="membersList" class="members-list empty-state">No members</div>
       </div>
     </div>
 
