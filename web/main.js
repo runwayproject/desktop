@@ -20,6 +20,8 @@ const elements = {
   ridValue: document.querySelector('#ridValue'),
   addPeerForm: document.querySelector('#addPeerForm'),
   peerRidInput: document.querySelector('#peerRidInput'),
+  addMemberForm: document.querySelector('#addMemberForm'),
+  memberRidInput: document.querySelector('#memberRidInput'),
   statusFacts: document.querySelector('#statusFacts'),
   toast: document.querySelector('#toast'),
 };
@@ -139,6 +141,25 @@ function render() {
   renderStatus(state.snapshot);
   renderPeers(state.snapshot);
   renderActivity(state.snapshot);
+  renderMembers(state.snapshot);
+}
+
+function renderMembers(snapshot) {
+  const el = document.querySelector('#membersList');
+  if (!snapshot.members || snapshot.members.length === 0) {
+    el.className = 'members-list empty-state';
+    el.textContent = 'No members';
+    return;
+  }
+
+  el.className = 'members-list';
+  el.innerHTML = '';
+  snapshot.members.forEach((m) => {
+    const div = document.createElement('div');
+    div.className = 'member-item';
+    div.textContent = m;
+    el.append(div);
+  });
 }
 
 async function pollMessages() {
@@ -181,6 +202,18 @@ elements.addPeerForm.addEventListener('submit', async (event) => {
 
   await invokeCommand('add_peer', { targetRid });
   elements.peerRidInput.value = '';
+});
+
+elements.addMemberForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const memberRid = elements.memberRidInput.value.trim();
+  if (!memberRid) {
+    showToast('Enter a member RID first.');
+    return;
+  }
+
+  await invokeCommand('add_member', { memberRid });
+  elements.memberRidInput.value = '';
 });
 
 elements.messageForm.addEventListener('submit', async (event) => {

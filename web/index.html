@@ -44,6 +44,10 @@
           <button id="sendButton" type="submit">Send</button>
         </form>
       </div>
+      <div class="chat-members">
+        <div class="chat-members-header">Members</div>
+        <div id="membersList" class="members-list empty-state">No members</div>
+      </div>
     </div>
 
     <div class="view hidden" id="view-peers">
@@ -53,6 +57,13 @@
         <form id="addPeerForm" class="row-form">
           <input id="peerRidInput" type="text" placeholder="Recipient RID" autocomplete="off" />
           <button type="submit">Send KeyPackage</button>
+        </form>
+        <hr />
+        <h2>Add Member to Active Group</h2>
+        <p class="muted">Invite a new member (by RID) into the currently selected conversation.</p>
+        <form id="addMemberForm" class="row-form">
+          <input id="memberRidInput" type="text" placeholder="Member RID" autocomplete="off" />
+          <button type="submit">Invite</button>
         </form>
       </div>
     </div>

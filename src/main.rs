@@ -62,6 +62,21 @@ fn add_peer(
 }
 
 #[tauri::command]
+fn add_member(
+    state: tauri::State<'_, AppState>,
+    member_rid: String,
+) -> Result<ClientSnapshot, String> {
+    let mut client = state
+        .client
+        .lock()
+        .map_err(|_| "client state lock poisoned".to_string())?;
+    client
+        .add_member(member_rid)
+        .map_err(|err| err.to_string())?;
+    Ok(client.snapshot())
+}
+
+#[tauri::command]
 fn select_peer(
     state: tauri::State<'_, AppState>,
     peer_rid: String,
@@ -132,6 +147,7 @@ fn main() {
             fetch_messages,
             send_message,
             add_peer,
+            add_member,
             select_peer,
             accept_pending_offer,
             reject_pending_offer,

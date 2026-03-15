@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
+use openmls::framing::MlsMessageBodyOut;
 use openmls::group::{MlsGroup, MlsGroupCreateConfig};
 use openmls::prelude::{
     BasicCredential, Capabilities, CredentialType, CredentialWithKey, Extension, ExtensionType,
     Extensions, ExternalSender, KeyPackage, KeyPackageIn, OpenMlsRand, ProtocolVersion,
-    SenderRatchetConfiguration, UnknownExtension, Welcome,
+    RatchetTreeIn, SenderRatchetConfiguration, UnknownExtension, Welcome,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
@@ -109,26 +110,14 @@ pub fn create_welcome_message(
     provider: &OpenMlsRustCrypto,
     signer: &SignatureKeyPair,
 ) -> Result<Welcome> {
-    let builder = group
-        .commit_builder()
-        .propose_adds(key_packages.iter().cloned());
+    let (_, welcome_msg, _) = group
+        .add_members(provider, signer, key_packages)
+        .context("adding members to group failed")?;
 
-    let builder = builder
-        .load_psks(provider.storage())
-        .context("loading PSKs failed")?;
-
-    let builder = builder
-        .build(provider.rand(), provider.crypto(), signer, |_| true)
-        .context("building commit failed")?;
-
-    let bundle = builder
-        .stage_commit(provider)
-        .context("staging commit failed")?;
-
-    let welcome = bundle
-        .welcome()
-        .cloned()
-        .context("no Welcome produced by commit")?;
+    let welcome = match welcome_msg.body() {
+        MlsMessageBodyOut::Welcome(welcome) => welcome.clone(),
+        _ => return Err(anyhow::anyhow!("expected welcome message")),
+    };
 
     group
         .merge_pending_commit(provider)
@@ -137,16 +126,39 @@ pub fn create_welcome_message(
     Ok(welcome)
 }
 
+pub fn add_members_and_get_commit(
+    group: &mut MlsGroup,
+    key_packages: &[KeyPackage],
+    provider: &OpenMlsRustCrypto,
+    signer: &SignatureKeyPair,
+) -> Result<(openmls::prelude::MlsMessageOut, Welcome)> {
+    let (commit, welcome_msg, _) = group
+        .add_members(provider, signer, key_packages)
+        .context("adding members to group failed")?;
+
+    let welcome = match welcome_msg.body() {
+        MlsMessageBodyOut::Welcome(welcome) => welcome.clone(),
+        _ => return Err(anyhow::anyhow!("expected welcome message")),
+    };
+
+    group
+        .merge_pending_commit(provider)
+        .context("merging staged commit into group failed")?;
+
+    Ok((commit, welcome))
+}
+
 pub fn join_from_welcome(
     provider: &OpenMlsRustCrypto,
     mls_group_join_config: &openmls::group::MlsGroupJoinConfig,
     welcome: Welcome,
+    ratchet_tree: Option<RatchetTreeIn>,
 ) -> Result<MlsGroup> {
     let staged = openmls::group::StagedWelcome::new_from_welcome(
         provider,
         mls_group_join_config,
         welcome,
-        None,
+        ratchet_tree,
     )
     .context("staging Welcome failed")?;
 
@@ -155,6 +167,23 @@ pub fn join_from_welcome(
         .context("turning staged Welcome into MlsGroup failed")?;
 
     Ok(group)
+}
+
+pub fn export_ratchet_tree_to_bytes(group: &MlsGroup) -> Result<Vec<u8>> {
+    let bytes = tls_codec::Serialize::tls_serialize_detached(&group.export_ratchet_tree())
+        .context("serializing RatchetTree failed")?;
+    Ok(bytes)
+}
+
+pub fn bytes_to_ratchet_tree(bytes: &[u8]) -> Result<RatchetTreeIn> {
+    let (ratchet_tree, rem) = <RatchetTreeIn as DeserializeBytes>::tls_deserialize_bytes(bytes)
+        .context("deserializing RatchetTree failed")?;
+
+    if !rem.is_empty() {
+        return Err(anyhow::anyhow!("trailing bytes after RatchetTree"));
+    }
+
+    Ok(ratchet_tree)
 }
 
 pub fn send_application_message(
@@ -178,6 +207,17 @@ pub fn receive_message(
         .process_message(provider, message)
         .context("processing incoming message failed")?;
     Ok(processed)
+}
+
+pub fn merge_staged_commit(
+    group: &mut MlsGroup,
+    provider: &OpenMlsRustCrypto,
+    staged_commit: openmls::group::StagedCommit,
+) -> Result<()> {
+    group
+        .merge_staged_commit(provider, staged_commit)
+        .context("merging staged commit failed")?;
+    Ok(())
 }
 
 pub fn mls_message_out_to_bytes(msg: &openmls::prelude::MlsMessageOut) -> Result<Vec<u8>> {
