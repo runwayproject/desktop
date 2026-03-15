@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asphalt</title>
+  <script type="module" src="./main.js"></script>
+</head>
+
+<body>
+  <nav class="menubar">
+    <span class="brand">Asphalt</span>
+    <button class="nav-btn active" data-view="chat">Chat</button>
+    <button class="nav-btn" data-view="peers">Peers</button>
+    <button class="nav-btn" data-view="identity">Identity</button>
+    <div class="menubar-spacer"></div>
+    <span id="connectionSummary" class="menubar-status">Connecting...</span>
+    <button id="refreshButton" class="nav-action">Refresh</button>
+  </nav>
+
+  <div class="invite-bar" id="inviteBar" hidden>
+    <span>Pending invite from <strong id="inviteRid">Unknown</strong></span>
+    <div class="invite-actions">
+      <button id="acceptInviteButton">Accept</button>
+      <button id="rejectInviteButton">Reject</button>
+    </div>
+  </div>
+
+  <div class="views">
+    <div class="view" id="view-chat">
+      <div class="chat-peers">
+        <div class="chat-peers-header">Conversations</div>
+        <div id="peerList" class="peer-list"></div>
+      </div>
+      <div class="chat-main">
+        <div class="chat-header">
+          <span id="activePeerTitle">No peer selected</span>
+          <button id="clearActivityButton" class="action-link">Clear</button>
+        </div>
+        <div id="activityList" class="activity-list empty-state">Messages and protocol events will appear here.</div>
+        <form id="messageForm" class="composer">
+          <textarea id="messageInput" rows="3" placeholder="Message active peer..."></textarea>
+          <button id="sendButton" type="submit">Send</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="view hidden" id="view-peers">
+      <div class="page-body">
+        <h2>Add Peer</h2>
+        <p class="muted">Send a KeyPackage to start an MLS session with a peer.</p>
+        <form id="addPeerForm" class="row-form">
+          <input id="peerRidInput" type="text" placeholder="Recipient RID" autocomplete="off" />
+          <button type="submit">Send KeyPackage</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="view hidden" id="view-identity">
+      <div class="page-body">
+        <h2>Your Identity</h2>
+        <p class="fact-label">Relay ID</p>
+        <p id="ridValue" class="mono">Loading...</p>
+        <hr />
+        <h2>Session Status</h2>
+        <div id="statusFacts" class="facts"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+</body>
+
+</html>

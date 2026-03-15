@@ -5,3 +5,7 @@
 /cpp/build
 /cpp/out
 /rust/target
+/node_modules
+/target2
+/dist
+/gen
