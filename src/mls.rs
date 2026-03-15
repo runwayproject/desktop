@@ -11,6 +11,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::types::Ciphersuite;
 use openmls_traits::types::SignatureScheme::ED25519;
+use std::collections::HashMap;
 use tls_codec::{Deserialize, DeserializeBytes};
 
 pub struct IdentityBundle {
@@ -61,6 +62,39 @@ pub fn create_identity() -> IdentityBundle {
         credential_with_key,
         provider,
     }
+}
+
+pub fn create_identity_from_persisted(
+    storage_values: HashMap<Vec<u8>, Vec<u8>>,
+    identity: Vec<u8>,
+    signature_public_key: Vec<u8>,
+) -> Result<IdentityBundle> {
+    let provider = OpenMlsRustCrypto::default();
+    {
+        let mut values = provider
+            .storage()
+            .values
+            .write()
+            .map_err(|_| anyhow::anyhow!("provider storage lock poisoned"))?;
+        *values = storage_values;
+    }
+
+    let signer = SignatureKeyPair::read(provider.storage(), &signature_public_key, ED25519)
+        .ok_or_else(|| anyhow::anyhow!("could not read persisted signature key pair"))?;
+
+    let credential = BasicCredential::new(identity);
+    let credential_with_key = CredentialWithKey {
+        credential: credential.into(),
+        signature_key: signer.to_public_vec().into(),
+    };
+    let ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
+
+    Ok(IdentityBundle {
+        ciphersuite,
+        signer,
+        credential_with_key,
+        provider,
+    })
 }
 
 pub fn create_group(identity_bundle: &IdentityBundle) -> MlsGroup {

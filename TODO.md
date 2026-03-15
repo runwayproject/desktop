@@ -1,4 +1,4 @@
 - TLS
 - keeping MLS state locally
-- use separate, stable identifier for groups
 - use rotaterid call to server
+- mls extension for group topics/names

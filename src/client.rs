@@ -1,20 +1,33 @@
 use anyhow::{Context, Result, bail};
+use argon2::{Algorithm, Argon2, Params, Version};
 use asphalt::mls;
 use asphalt::transport::{
     ClientPacket, EncryptedBlob, RequestAuth, ServerPacket, auth_signing_payload, decode_packet,
     encode_packet, read_framed, write_framed,
 };
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{Signer, SigningKey};
-use openmls::prelude::{KeyPackage, MlsGroupJoinConfig, ProcessedMessageContent};
+use openmls::group::GroupId;
+use openmls::prelude::{KeyPackage, MlsGroup, MlsGroupJoinConfig, ProcessedMessageContent};
+use openmls_traits::OpenMlsProvider;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
+use std::fs;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ACTIVITY: usize = 200;
 const BOOTSTRAP_MAGIC: u32 = 0x52575931;
+const PERSISTENCE_VERSION: u32 = 1;
+const PERSISTENCE_ENVELOPE_VERSION: u32 = 1;
+const PERSISTENCE_SALT_LEN: usize = 16;
+const PERSISTENCE_NONCE_LEN: usize = 12;
+const PERSISTENCE_KEY_LEN: usize = 32;
 
 pub struct ClientState {
     server_addr: String,
@@ -28,6 +41,31 @@ pub struct ClientState {
     pending_group_additions: HashMap<String, String>,
     pending_offer_from: Option<String>,
     active_group_id: Option<String>,
+    persistence_salt: Vec<u8>,
+    state_key: [u8; PERSISTENCE_KEY_LEN],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedClientState {
+    version: u32,
+    server_addr: String,
+    my_rid: String,
+    transport_signing_key: Vec<u8>,
+    identity: Vec<u8>,
+    identity_signature_public_key: Vec<u8>,
+    storage_values: HashMap<Vec<u8>, Vec<u8>>,
+    conversation_group_ids: HashMap<String, Vec<u8>>,
+    conversation_members: HashMap<String, Vec<String>>,
+    active_group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedPersistedState {
+    version: u32,
+    kdf: String,
+    salt: Vec<u8>,
+    nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,10 +92,17 @@ pub struct ClientSnapshot {
 impl ClientState {
     pub fn connect(server_addr: impl Into<String>) -> Result<Self> {
         let server_addr = server_addr.into();
+        let passphrase = acquire_state_passphrase()?;
+
+        if let Some(state) = Self::load_persisted_state(&server_addr, &passphrase)? {
+            return Ok(state);
+        }
 
         let mut secret = [0_u8; 32];
         rand::rng().fill(&mut secret);
         let signing_key = SigningKey::from_bytes(&secret);
+        let persistence_salt = random_persistence_salt();
+        let state_key = derive_state_key(&passphrase, &persistence_salt)?;
 
         let auth = make_auth(&signing_key, "issue_rid", b"");
         let rid = match send_client_packet(&server_addr, ClientPacket::IssueRid { auth })? {
@@ -77,10 +122,131 @@ impl ClientState {
             pending_group_additions: HashMap::new(),
             pending_offer_from: None,
             active_group_id: None,
+            persistence_salt,
+            state_key,
         };
 
         state.log("Connected to relay.");
+        state.save_persisted_state()?;
         Ok(state)
+    }
+
+    fn load_persisted_state(server_addr: &str, passphrase: &str) -> Result<Option<Self>> {
+        let path = persistence_path(server_addr);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let bytes =
+            fs::read(&path).with_context(|| format!("reading persisted state at {:?}", path))?;
+        let encrypted: EncryptedPersistedState = serde_cbor::from_slice(&bytes)
+            .context("decoding encrypted persisted state envelope failed")?;
+
+        if encrypted.version != PERSISTENCE_ENVELOPE_VERSION {
+            return Ok(None);
+        }
+
+        let state_key = derive_state_key(passphrase, &encrypted.salt)?;
+        let plaintext = decrypt_persisted_blob(&encrypted, &state_key)
+            .context("decrypting persisted state failed")?;
+        let persisted: PersistedClientState = serde_cbor::from_slice(&plaintext)
+            .context("decoding decrypted persisted state failed")?;
+
+        if persisted.version != PERSISTENCE_VERSION {
+            return Ok(None);
+        }
+
+        if persisted.transport_signing_key.len() != 32 {
+            bail!("persisted transport signing key has invalid length")
+        }
+
+        let mut sk_bytes = [0_u8; 32];
+        sk_bytes.copy_from_slice(&persisted.transport_signing_key);
+        let signing_key = SigningKey::from_bytes(&sk_bytes);
+
+        let identity = mls::create_identity_from_persisted(
+            persisted.storage_values,
+            persisted.identity,
+            persisted.identity_signature_public_key,
+        )?;
+
+        let mut conversations: HashMap<String, MlsGroup> = HashMap::new();
+        for (app_group_id, mls_group_id_bytes) in &persisted.conversation_group_ids {
+            let mls_group_id = GroupId::from_slice(mls_group_id_bytes);
+            if let Some(group) = MlsGroup::load(identity.provider.storage(), &mls_group_id)
+                .context("loading MLS group from provider storage failed")?
+            {
+                conversations.insert(app_group_id.clone(), group);
+            }
+        }
+
+        let active_group_id = persisted
+            .active_group_id
+            .filter(|group_id| conversations.contains_key(group_id));
+
+        let mut state = Self {
+            server_addr: persisted.server_addr,
+            signing_key,
+            my_rid: persisted.my_rid,
+            activity: VecDeque::new(),
+            identity,
+            conversations,
+            conversation_members: persisted.conversation_members,
+            pending_keypackages: HashMap::new(),
+            pending_group_additions: HashMap::new(),
+            pending_offer_from: None,
+            active_group_id,
+            persistence_salt: encrypted.salt,
+            state_key,
+        };
+
+        state.log("Loaded local MLS state.");
+        Ok(Some(state))
+    }
+
+    fn save_persisted_state(&self) -> Result<()> {
+        let mut conversation_group_ids = HashMap::new();
+        for (app_group_id, group) in &self.conversations {
+            conversation_group_ids.insert(app_group_id.clone(), group.group_id().to_vec());
+        }
+
+        let storage_values = self
+            .identity
+            .provider
+            .storage()
+            .values
+            .read()
+            .map_err(|_| anyhow::anyhow!("provider storage lock poisoned"))?
+            .clone();
+
+        let persisted = PersistedClientState {
+            version: PERSISTENCE_VERSION,
+            server_addr: self.server_addr.clone(),
+            my_rid: self.my_rid.clone(),
+            transport_signing_key: self.signing_key.to_bytes().to_vec(),
+            identity: extract_identity_bytes(&self.identity.credential_with_key),
+            identity_signature_public_key: self.identity.signer.to_public_vec(),
+            storage_values,
+            conversation_group_ids,
+            conversation_members: self.conversation_members.clone(),
+            active_group_id: self.active_group_id.clone(),
+        };
+
+        let plaintext =
+            serde_cbor::to_vec(&persisted).context("encoding persisted state failed")?;
+        let encrypted = encrypt_persisted_blob(&plaintext, &self.state_key, &self.persistence_salt)
+            .context("encrypting persisted state failed")?;
+        let bytes =
+            serde_cbor::to_vec(&encrypted).context("encoding encrypted persisted state failed")?;
+        let path = persistence_path(&self.server_addr);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating persistence directory at {:?}", parent))?;
+        }
+
+        fs::write(&path, bytes)
+            .with_context(|| format!("writing persisted state at {:?}", path))?;
+        Ok(())
     }
 
     pub fn snapshot(&self) -> ClientSnapshot {
@@ -122,6 +288,7 @@ impl ClientState {
             "Created group {}. Invite members from the Groups view.",
             short_group_id(&group_id)
         ));
+        self.save_persisted_state()?;
         Ok(())
     }
 
@@ -270,6 +437,7 @@ impl ClientState {
             member_rid,
             short_group_id(&group_id)
         ));
+        self.save_persisted_state()?;
         Ok(())
     }
 
@@ -279,7 +447,7 @@ impl ClientState {
         }
 
         self.active_group_id = Some(group_id.clone());
-        self.log(format!("Active group: {}", short_group_id(&group_id)));
+        self.save_persisted_state()?;
         Ok(())
     }
 
@@ -360,14 +528,13 @@ impl ClientState {
             }
         }
 
-        if !delivered.is_empty() {
-            self.log(format!(
-                "You -> group {} [{}]: {}",
-                short_group_id(&target),
-                delivered.join(", "),
-                clean
-            ));
-        }
+        self.log(format!(
+            "You (group {}): {}",
+            short_group_id(&target),
+            clean
+        ));
+
+        self.save_persisted_state()?;
 
         Ok(())
     }
@@ -394,6 +561,7 @@ impl ClientState {
                 for blob in blobs {
                     self.process_incoming_blob(blob)?;
                 }
+                self.save_persisted_state()?;
             }
             ServerPacket::Error { message } => {
                 self.log(format!("Fetch denied: {message}"));
@@ -463,6 +631,7 @@ impl ClientState {
             short_group_id(&group_id),
             target
         ));
+        self.save_persisted_state()?;
         Ok(())
     }
 
@@ -574,6 +743,7 @@ impl ClientState {
                     short_group_id(&group_id),
                     from_rid
                 ));
+                self.save_persisted_state()?;
             }
             BootstrapPayload::GroupCommit {
                 from_rid,
@@ -617,6 +787,7 @@ impl ClientState {
                             short_group_id(&group_id)
                         ));
                     }
+                    self.save_persisted_state()?;
                 } else {
                     bail!("received non-commit MLS payload in GroupCommit envelope")
                 }
@@ -724,6 +895,107 @@ fn random_group_id() -> String {
         let _ = write!(&mut id, "{:02x}", byte);
     }
     id
+}
+
+fn extract_identity_bytes(credential_with_key: &openmls::prelude::CredentialWithKey) -> Vec<u8> {
+    credential_with_key.credential.serialized_content().to_vec()
+}
+
+fn persistence_path(server_addr: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(server_addr.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut suffix = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        let _ = write!(&mut suffix, "{:02x}", byte);
+    }
+
+    let mut base = executable_dir();
+    base.push(format!("desktop-state-{}.cbor", suffix));
+    base
+}
+
+fn executable_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn acquire_state_passphrase() -> Result<String> {
+    let value = rpassword::prompt_password("State passphrase: ")
+        .context("prompting for state passphrase failed")?;
+    if value.trim().is_empty() {
+        bail!("state passphrase cannot be empty")
+    }
+
+    Ok(value)
+}
+
+fn encrypt_persisted_blob(
+    plaintext: &[u8],
+    state_key: &[u8; PERSISTENCE_KEY_LEN],
+    salt: &[u8],
+) -> Result<EncryptedPersistedState> {
+    let mut nonce = vec![0_u8; PERSISTENCE_NONCE_LEN];
+    rand::rng().fill(nonce.as_mut_slice());
+
+    let cipher = ChaCha20Poly1305::new(state_key.into());
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|_| anyhow::anyhow!("encrypting persisted state payload failed"))?;
+
+    Ok(EncryptedPersistedState {
+        version: PERSISTENCE_ENVELOPE_VERSION,
+        kdf: "argon2id".to_string(),
+        salt: salt.to_vec(),
+        nonce,
+        ciphertext,
+    })
+}
+
+fn decrypt_persisted_blob(
+    encrypted: &EncryptedPersistedState,
+    state_key: &[u8; PERSISTENCE_KEY_LEN],
+) -> Result<Vec<u8>> {
+    if encrypted.kdf != "argon2id" {
+        bail!("unsupported persisted-state KDF: {}", encrypted.kdf)
+    }
+
+    if encrypted.nonce.len() != PERSISTENCE_NONCE_LEN {
+        bail!("invalid persisted-state nonce length")
+    }
+
+    let cipher = ChaCha20Poly1305::new(state_key.into());
+    let plaintext = cipher
+        .decrypt(
+            Nonce::from_slice(&encrypted.nonce),
+            encrypted.ciphertext.as_ref(),
+        )
+        .map_err(|_| anyhow::anyhow!("decrypting persisted state payload failed"))?;
+    Ok(plaintext)
+}
+
+fn derive_state_key(passphrase: &str, salt: &[u8]) -> Result<[u8; PERSISTENCE_KEY_LEN]> {
+    if salt.len() != PERSISTENCE_SALT_LEN {
+        bail!("invalid persisted-state salt length")
+    }
+
+    let mut key = [0_u8; PERSISTENCE_KEY_LEN];
+    let params = Params::new(64 * 1024, 3, 1, Some(PERSISTENCE_KEY_LEN))
+        .map_err(|e| anyhow::anyhow!("building Argon2id params failed: {e:?}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    argon2
+        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .map_err(|e| anyhow::anyhow!("deriving state key with Argon2id failed: {e:?}"))?;
+    Ok(key)
+}
+
+fn random_persistence_salt() -> Vec<u8> {
+    let mut salt = vec![0_u8; PERSISTENCE_SALT_LEN];
+    rand::rng().fill(salt.as_mut_slice());
+    salt
 }
 
 fn make_auth(signing_key: &SigningKey, action: &str, body: &[u8]) -> RequestAuth {
