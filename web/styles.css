@@ -278,11 +278,11 @@ textarea {
 }
 
 .activity-item {
-  font-size: 13px;
+  font-size: 14px;
   color: #b8b8b8;
   padding: 4px 0;
   border-bottom: 1px solid #161616;
-  font-family: "Courier New", monospace;
+  font-family: Arial, Verdana, Helvetica, sans-serif;
   word-break: break-all;
 }
 
@@ -302,7 +302,7 @@ textarea {
   border-right: 1px solid #1a1a1a;
   color: #ededed;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   padding: 10px 14px;
   resize: none;
   outline: none;

@@ -195,6 +195,20 @@ elements.messageForm.addEventListener('submit', async (event) => {
   elements.messageInput.focus();
 });
 
+elements.messageInput.addEventListener('keydown', async (event) => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    const message = elements.messageInput.value;
+    if (!message.trim()) {
+      return;
+    }
+
+    await invokeCommand('send_message', { message });
+    elements.messageInput.value = '';
+    elements.messageInput.focus();
+  }
+});
+
 document.querySelectorAll('.nav-btn[data-view]').forEach((btn) => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.nav-btn[data-view]').forEach((b) => b.classList.remove('active'));
