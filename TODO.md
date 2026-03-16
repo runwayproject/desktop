@@ -1,4 +1,18 @@
 - TLS
-- keeping MLS state locally
+- keeping more mls state locally
+- keeping message history locally (configurable)
+- have message history be group specific
+- direct messages
+- file sharing
+- group management (add/remove members, change group name/topic)
+- group invitations
 - use rotaterid call to server
 - mls extension for group topics/names
+- use keyserver
+- configuration
+- show member count 
+- show group topic
+- show group name
+- set nicknames for members
+- multiple identities
+
