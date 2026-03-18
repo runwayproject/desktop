@@ -1,4 +1,5 @@
 - keeping more mls state locally
+- generate tokens that can contain the keyserver handle as well as the rid
 - keeping message history locally (configurable)
 - have message history be group specific
 - direct messages
