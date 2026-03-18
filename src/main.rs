@@ -119,7 +119,9 @@ fn reject_pending_offer(state: tauri::State<'_, AppState>) -> Result<ClientSnaps
         .client
         .lock()
         .map_err(|_| "client state lock poisoned".to_string())?;
-    client.reject_pending_offer();
+    client
+        .reject_pending_offer()
+        .map_err(|err| err.to_string())?;
     Ok(client.snapshot())
 }
 

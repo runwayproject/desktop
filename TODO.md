@@ -1,4 +1,3 @@
-- TLS
 - keeping more mls state locally
 - keeping message history locally (configurable)
 - have message history be group specific

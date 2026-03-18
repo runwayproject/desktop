@@ -38,6 +38,7 @@ pub struct ClientState {
     conversations: HashMap<String, openmls::group::MlsGroup>,
     conversation_members: HashMap<String, Vec<String>>,
     pending_keypackages: HashMap<String, KeyPackage>,
+    pending_keypackage_requests: HashMap<String, KeyPackage>,
     pending_group_additions: HashMap<String, String>,
     pending_offer_from: Option<String>,
     active_group_id: Option<String>,
@@ -57,6 +58,10 @@ struct PersistedClientState {
     conversation_group_ids: HashMap<String, Vec<u8>>,
     conversation_members: HashMap<String, Vec<String>>,
     active_group_id: Option<String>,
+    pending_keypackages: HashMap<String, Vec<u8>>,
+    pending_keypackages_to_send: HashMap<String, Vec<u8>>,
+    pending_group_additions: HashMap<String, String>,
+    pending_offer_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +124,7 @@ impl ClientState {
             conversations: HashMap::new(),
             conversation_members: HashMap::new(),
             pending_keypackages: HashMap::new(),
+            pending_keypackage_requests: HashMap::new(),
             pending_group_additions: HashMap::new(),
             pending_offer_from: None,
             active_group_id: None,
@@ -184,6 +190,36 @@ impl ClientState {
             .active_group_id
             .filter(|group_id| conversations.contains_key(group_id));
 
+        let mut pending_keypackages: HashMap<String, KeyPackage> = HashMap::new();
+        for (rid, kp_bytes) in persisted.pending_keypackages {
+            match mls::bytes_to_keypackage(&identity.provider, &kp_bytes) {
+                Ok(kp) => {
+                    pending_keypackages.insert(rid, kp);
+                }
+                Err(_) => {}
+            }
+        }
+        let mut pending_keypackage_requests: HashMap<String, KeyPackage> = HashMap::new();
+        for (rid, kp_bytes) in persisted.pending_keypackages_to_send {
+            match mls::bytes_to_keypackage(&identity.provider, &kp_bytes) {
+                Ok(kp) => {
+                    pending_keypackage_requests.insert(rid, kp);
+                }
+                Err(_) => {}
+            }
+        }
+        let pending_group_additions: HashMap<String, String> = persisted
+            .pending_group_additions
+            .into_iter()
+            .filter(|(_, group_id)| conversations.contains_key(group_id.as_str()))
+            .collect();
+        let pending_offer_from = persisted
+            .pending_offer_from
+            .filter(|rid| {
+                pending_keypackages.contains_key(rid.as_str())
+                    || pending_keypackage_requests.contains_key(rid.as_str())
+            });
+
         let mut state = Self {
             server_addr: persisted.server_addr,
             signing_key,
@@ -192,9 +228,10 @@ impl ClientState {
             identity,
             conversations,
             conversation_members: persisted.conversation_members,
-            pending_keypackages: HashMap::new(),
-            pending_group_additions: HashMap::new(),
-            pending_offer_from: None,
+            pending_keypackages,
+            pending_keypackage_requests,
+            pending_group_additions,
+            pending_offer_from,
             active_group_id,
             persistence_salt: encrypted.salt,
             state_key,
@@ -219,6 +256,20 @@ impl ClientState {
             .map_err(|_| anyhow::anyhow!("provider storage lock poisoned"))?
             .clone();
 
+        let mut pending_keypackages_bytes: HashMap<String, Vec<u8>> = HashMap::new();
+        for (rid, kp) in &self.pending_keypackages {
+            let bytes = mls::keypackage_to_bytes(kp)
+                .with_context(|| format!("serializing pending KeyPackage for {rid} failed"))?;
+            pending_keypackages_bytes.insert(rid.clone(), bytes);
+        }
+        let mut pending_keypackages_to_send: HashMap<String, Vec<u8>> = HashMap::new();
+        for (rid, kp) in &self.pending_keypackage_requests {
+            let bytes = mls::keypackage_to_bytes(kp).with_context(|| {
+                format!("serializing outgoing pending KeyPackage for {rid} failed")
+            })?;
+            pending_keypackages_to_send.insert(rid.clone(), bytes);
+        }
+
         let persisted = PersistedClientState {
             version: PERSISTENCE_VERSION,
             server_addr: self.server_addr.clone(),
@@ -230,6 +281,10 @@ impl ClientState {
             conversation_group_ids,
             conversation_members: self.conversation_members.clone(),
             active_group_id: self.active_group_id.clone(),
+            pending_keypackages: pending_keypackages_bytes,
+            pending_keypackages_to_send: pending_keypackages_to_send,
+            pending_group_additions: self.pending_group_additions.clone(),
+            pending_offer_from: self.pending_offer_from.clone(),
         };
 
         let plaintext =
@@ -461,14 +516,35 @@ impl ClientState {
             return Ok(());
         };
 
-        self.create_invite_for_target(from_rid)
+        if let Some(kp) = self.pending_keypackage_requests.remove(&from_rid) {
+            let key_package_bytes = mls::keypackage_to_bytes(&kp)?;
+            let envelope = BootstrapEnvelope {
+                magic: BOOTSTRAP_MAGIC,
+                payload: BootstrapPayload::KeyPackageOffer {
+                    from_rid: self.my_rid.clone(),
+                    key_package: key_package_bytes,
+                },
+            };
+
+            self.send_bootstrap_envelope(envelope, from_rid.clone())?;
+            self.log(format!("Sent KeyPackage to {}.", from_rid));
+            self.save_persisted_state()?;
+            Ok(())
+        } else {
+            self.create_invite_for_target(from_rid)
+        }
     }
 
-    pub fn reject_pending_offer(&mut self) {
+    pub fn reject_pending_offer(&mut self) -> Result<()> {
         if let Some(from_rid) = self.pending_offer_from.take() {
-            self.pending_keypackages.remove(&from_rid);
-            self.log(format!("Rejected KeyPackage offer from {}.", from_rid));
+            if self.pending_keypackage_requests.remove(&from_rid).is_some() {
+                self.log(format!("Rejected KeyPackage request from {}.", from_rid));
+            } else {
+                self.pending_keypackages.remove(&from_rid);
+                self.log(format!("Rejected KeyPackage offer from {}.", from_rid));
+            }
         }
+        self.save_persisted_state()
     }
 
     pub fn send_message(&mut self, message: String) -> Result<()> {
@@ -682,19 +758,13 @@ impl ClientState {
     fn handle_bootstrap_envelope(&mut self, envelope: BootstrapEnvelope) -> Result<()> {
         match envelope.payload {
             BootstrapPayload::KeyPackageRequest { from_rid } => {
+                // ask the user to accept or reject it
                 let key_package = mls::build_keypackage(&self.identity)?;
-                let key_package_bytes = mls::keypackage_to_bytes(&key_package)?;
-                let envelope = BootstrapEnvelope {
-                    magic: BOOTSTRAP_MAGIC,
-                    payload: BootstrapPayload::KeyPackageOffer {
-                        from_rid: self.my_rid.clone(),
-                        key_package: key_package_bytes,
-                    },
-                };
-
-                self.send_bootstrap_envelope(envelope, from_rid.clone())?;
+                self.pending_keypackage_requests
+                    .insert(from_rid.clone(), key_package);
+                self.pending_offer_from = Some(from_rid.clone());
                 self.log(format!(
-                    "Sent KeyPackage to {} for an existing group invitation.",
+                    "Incoming KeyPackage request from {}. Accept or reject it from the sidebar.",
                     from_rid
                 ));
             }
