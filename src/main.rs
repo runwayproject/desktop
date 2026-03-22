@@ -135,6 +135,16 @@ fn clear_activity(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, S
     Ok(client.snapshot())
 }
 
+#[tauri::command]
+fn rotate_rid(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, String> {
+    let mut client = state
+        .client
+        .lock()
+        .map_err(|_| "client state lock poisoned".to_string())?;
+    client.rotate_rid().map_err(|err| err.to_string())?;
+    Ok(client.snapshot())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let server_addr = args
@@ -165,6 +175,7 @@ fn main() {
             accept_pending_offer,
             reject_pending_offer,
             clear_activity,
+            rotate_rid,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

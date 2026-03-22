@@ -493,6 +493,28 @@ textarea {
   margin: 0 0 12px 0;
 }
 
+.identity-actions {
+  display: flex;
+  margin: 0 0 8px 0;
+}
+
+.identity-actions button {
+  background: #141414;
+  border: 1px solid #2a2a2a;
+  color: #888888;
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 6px 14px;
+  border-radius: 0;
+}
+
+.identity-actions button:hover {
+  background: #202020;
+  color: #ededed;
+  border-color: #4a4a4a;
+}
+
 .row-form {
   display: flex;
   gap: 0;

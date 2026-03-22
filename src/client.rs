@@ -511,6 +511,33 @@ impl ClientState {
         self.log("Activity cleared.");
     }
 
+    pub fn rotate_rid(&mut self) -> Result<()> {
+        let old_rid = self.my_rid.clone();
+        let auth = make_auth(&self.signing_key, "rotate_rid", old_rid.as_bytes());
+        let response = send_client_packet(
+            &self.server_addr,
+            ClientPacket::RotateRid {
+                rid: old_rid.clone(),
+                auth,
+            },
+        )?;
+
+        match response {
+            ServerPacket::RidRotated { new_rid, .. } => {
+                self.apply_new_rid(old_rid, new_rid, false)?;
+                Ok(())
+            }
+            ServerPacket::Error { message } => {
+                if is_rid_missing_error(&message) {
+                    self.issue_new_rid(old_rid)
+                } else {
+                    bail!("RID rotate denied: {message}")
+                }
+            }
+            other => bail!("unexpected response while rotating RID: {other:#?}"),
+        }
+    }
+
     pub fn accept_pending_offer(&mut self) -> Result<()> {
         let Some(from_rid) = self.pending_offer_from.take() else {
             return Ok(());
@@ -914,6 +941,47 @@ impl ClientState {
         }
     }
 
+    fn issue_new_rid(&mut self, old_rid: String) -> Result<()> {
+        let auth = make_auth(&self.signing_key, "issue_rid", b"");
+        let response = send_client_packet(&self.server_addr, ClientPacket::IssueRid { auth })?;
+
+        match response {
+            ServerPacket::RidIssued { rid, .. } => {
+                self.apply_new_rid(old_rid, rid, true)?;
+                Ok(())
+            }
+            ServerPacket::Error { message } => {
+                bail!("RID re-issue denied: {message}")
+            }
+            other => bail!("unexpected response while issuing RID: {other:#?}"),
+        }
+    }
+
+    fn apply_new_rid(&mut self, old_rid: String, new_rid: String, reissued: bool) -> Result<()> {
+        self.my_rid = new_rid.clone();
+
+        for members in self.conversation_members.values_mut() {
+            for rid in members.iter_mut() {
+                if rid.as_str() == old_rid.as_str() {
+                    *rid = new_rid.clone();
+                }
+            }
+        }
+
+        if reissued {
+            self.log(format!(
+                "Previous RID expired. Issued new RID {}.",
+                new_rid
+            ));
+        } else {
+            self.log(format!("Rotated RID from {} to {}.", old_rid, new_rid));
+        }
+        self.log("Share your new RID with contacts so future messages target the updated relay identity.");
+        // TODO: just use MLS to update the rid
+        self.save_persisted_state()?;
+        Ok(())
+    }
+
     fn log(&mut self, line: impl Into<String>) {
         if self.activity.len() >= MAX_ACTIVITY {
             let _ = self.activity.pop_front();
@@ -1091,6 +1159,10 @@ fn send_client_packet(addr: &str, packet: ClientPacket) -> Result<ServerPacket> 
     let frame = read_framed(&mut stream, 2 * 1024 * 1024)?;
     let response: ServerPacket = decode_packet(&frame)?;
     Ok(response)
+}
+
+fn is_rid_missing_error(message: &str) -> bool {
+    message.contains("loading rid owner failed") || message.contains("unknown or expired rid")
 }
 
 fn unix_ms_now() -> u64 {

@@ -1,4 +1,5 @@
 - keeping more mls state locally
+- on first launch, confirm the password by having the user enter it twice
 - generate tokens that can contain the keyserver handle as well as the rid
 - keeping message history locally (configurable)
 - have message history be group specific
@@ -6,7 +7,6 @@
 - file sharing
 - group management (add/remove members, change group name/topic)
 - group invitations
-- use rotaterid call to server
 - mls extension for group topics/names
 - use keyserver
 - configuration

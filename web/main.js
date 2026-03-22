@@ -18,6 +18,7 @@ const elements = {
   messageInput: document.querySelector('#messageInput'),
   sendButton: document.querySelector('#sendButton'),
   ridValue: document.querySelector('#ridValue'),
+  rotateRidButton: document.querySelector('#rotateRidButton'),
   createGroupButton: document.querySelector('#createGroupButton'),
   toggleInviteButton: document.querySelector('#toggleInviteButton'),
   addMemberForm: document.querySelector('#addMemberForm'),
@@ -203,6 +204,10 @@ elements.refreshButton.addEventListener('click', () => {
 
 elements.clearActivityButton.addEventListener('click', () => {
   void invokeCommand('clear_activity');
+});
+
+elements.rotateRidButton.addEventListener('click', () => {
+  void invokeCommand('rotate_rid');
 });
 
 elements.acceptInviteButton.addEventListener('click', () => {
