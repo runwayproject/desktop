@@ -13,7 +13,6 @@ use openmls::prelude::{KeyPackage, MlsGroup, MlsGroupJoinConfig, ProcessedMessag
 use openmls_traits::OpenMlsProvider;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
@@ -99,9 +98,10 @@ pub struct ClientSnapshot {
 impl ClientState {
     pub fn connect(server_addr: impl Into<String>) -> Result<Self> {
         let server_addr = server_addr.into();
-        let passphrase = acquire_state_passphrase()?;
+        let is_first_launch = !persistence_path().exists();
+        let passphrase = acquire_state_passphrase(is_first_launch)?;
 
-        if let Some(state) = Self::load_persisted_state(&server_addr, &passphrase)? {
+        if let Some(state) = Self::load_persisted_state(&passphrase)? {
             return Ok(state);
         }
 
@@ -139,8 +139,8 @@ impl ClientState {
         Ok(state)
     }
 
-    fn load_persisted_state(server_addr: &str, passphrase: &str) -> Result<Option<Self>> {
-        let path = persistence_path(server_addr);
+    fn load_persisted_state(passphrase: &str) -> Result<Option<Self>> {
+        let path = persistence_path();
         if !path.exists() {
             return Ok(None);
         }
@@ -295,7 +295,7 @@ impl ClientState {
             .context("encrypting persisted state failed")?;
         let bytes =
             serde_cbor::to_vec(&encrypted).context("encoding encrypted persisted state failed")?;
-        let path = persistence_path(&self.server_addr);
+        let path = persistence_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating persistence directory at {:?}", parent))?;
@@ -1194,18 +1194,9 @@ fn extract_identity_bytes(credential_with_key: &openmls::prelude::CredentialWith
     credential_with_key.credential.serialized_content().to_vec()
 }
 
-fn persistence_path(server_addr: &str) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(server_addr.as_bytes());
-    let digest = hasher.finalize();
-
-    let mut suffix = String::with_capacity(16);
-    for byte in digest.iter().take(8) {
-        let _ = write!(&mut suffix, "{:02x}", byte);
-    }
-
+fn persistence_path() -> PathBuf {
     let mut base = executable_dir();
-    base.push(format!("desktop-state-{}.cbor", suffix));
+    base.push("asphalt.cbor");
     base
 }
 
@@ -1216,11 +1207,19 @@ fn executable_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn acquire_state_passphrase() -> Result<String> {
+fn acquire_state_passphrase(confirm_twice: bool) -> Result<String> {
     let value = rpassword::prompt_password("State passphrase: ")
         .context("prompting for state passphrase failed")?;
     if value.trim().is_empty() {
         bail!("state passphrase cannot be empty")
+    }
+
+    if confirm_twice {
+        let confirmation = rpassword::prompt_password("Confirm state passphrase: ")
+            .context("prompting for state passphrase confirmation failed")?;
+        if confirmation != value {
+            bail!("state passphrases did not match")
+        }
     }
 
     Ok(value)
