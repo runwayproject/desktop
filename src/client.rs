@@ -19,6 +19,7 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::{Zeroize, Zeroizing};
 
 // consts
 const MAX_ACTIVITY: usize = 200;
@@ -101,15 +102,19 @@ impl ClientState {
         let is_first_launch = !persistence_path().exists();
         let passphrase = acquire_state_passphrase(is_first_launch)?;
 
-        if let Some(state) = Self::load_persisted_state(&passphrase)? {
+        if let Some(state) = Self::load_persisted_state(passphrase.as_str())? {
             return Ok(state);
         }
 
-        let mut secret = [0_u8; 32];
-        rand::rng().fill(&mut secret);
-        let signing_key = SigningKey::from_bytes(&secret);
+        let signing_key = {
+            let mut secret = [0_u8; 32];
+            rand::rng().fill(&mut secret);
+            let key = SigningKey::from_bytes(&secret);
+            secret.zeroize();
+            key
+        };
         let persistence_salt = random_persistence_salt();
-        let state_key = derive_state_key(&passphrase, &persistence_salt)?;
+        let state_key = derive_state_key(passphrase.as_str(), &persistence_salt)?;
 
         let auth = make_auth(&signing_key, "issue_rid", b"");
         let rid = match send_client_packet(&server_addr, ClientPacket::IssueRid { auth })? {
@@ -155,10 +160,11 @@ impl ClientState {
         }
 
         let state_key = derive_state_key(passphrase, &encrypted.salt)?;
-        let plaintext = decrypt_persisted_blob(&encrypted, &state_key)
+        let mut plaintext = decrypt_persisted_blob(&encrypted, &state_key)
             .context("decrypting persisted state failed")?;
-        let persisted: PersistedClientState = serde_cbor::from_slice(&plaintext)
+        let mut persisted: PersistedClientState = serde_cbor::from_slice(&plaintext)
             .context("decoding decrypted persisted state failed")?;
+        plaintext.zeroize();
 
         if persisted.version != PERSISTENCE_VERSION {
             return Ok(None);
@@ -171,6 +177,8 @@ impl ClientState {
         let mut sk_bytes = [0_u8; 32];
         sk_bytes.copy_from_slice(&persisted.transport_signing_key);
         let signing_key = SigningKey::from_bytes(&sk_bytes);
+        sk_bytes.zeroize();
+        persisted.transport_signing_key.zeroize();
 
         let identity = mls::create_identity_from_persisted(
             persisted.storage_values,
@@ -1207,17 +1215,21 @@ fn executable_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn acquire_state_passphrase(confirm_twice: bool) -> Result<String> {
-    let value = rpassword::prompt_password("State passphrase: ")
-        .context("prompting for state passphrase failed")?;
+fn acquire_state_passphrase(confirm_twice: bool) -> Result<Zeroizing<String>> {
+    let value = Zeroizing::new(
+        rpassword::prompt_password("State passphrase: ")
+            .context("prompting for state passphrase failed")?,
+    );
     if value.trim().is_empty() {
         bail!("state passphrase cannot be empty")
     }
 
     if confirm_twice {
-        let confirmation = rpassword::prompt_password("Confirm state passphrase: ")
-            .context("prompting for state passphrase confirmation failed")?;
-        if confirmation != value {
+        let confirmation = Zeroizing::new(
+            rpassword::prompt_password("Confirm state passphrase: ")
+                .context("prompting for state passphrase confirmation failed")?,
+        );
+        if confirmation.as_str() != value.as_str() {
             bail!("state passphrases did not match")
         }
     }

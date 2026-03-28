@@ -114,6 +114,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tls_codec",
+ "zeroize",
 ]
 
 [[package]]
