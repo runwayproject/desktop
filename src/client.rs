@@ -21,8 +21,10 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// consts
 const MAX_ACTIVITY: usize = 200;
 const BOOTSTRAP_MAGIC: u32 = 0x52575931;
+const GROUP_CONTROL_MAGIC: u32 = 0x52575932;
 const PERSISTENCE_VERSION: u32 = 1;
 const PERSISTENCE_ENVELOPE_VERSION: u32 = 1;
 const PERSISTENCE_SALT_LEN: usize = 16;
@@ -747,6 +749,7 @@ impl ClientState {
         }
 
         let mut decrypted_line: Option<(String, String)> = None;
+        let mut pending_rid_update: Option<(String, String, String)> = None;
         for (group_id, group) in &mut self.conversations {
             let pm = match mls::bytes_to_protocol_message(&blob.ciphertext) {
                 Ok(pm) => pm,
@@ -760,13 +763,39 @@ impl ClientState {
 
             let text = match processed.into_content() {
                 ProcessedMessageContent::ApplicationMessage(app) => {
-                    String::from_utf8_lossy(&app.into_bytes()).to_string()
+
+                    let app_bytes = app.into_bytes();
+                    if let Ok(control) = serde_cbor::from_slice::<GroupControlEnvelope>(&app_bytes)
+                        && control.magic == GROUP_CONTROL_MAGIC
+                    {
+                        match control.payload {
+                            GroupControlPayload::RidUpdated { old_rid, new_rid } => {
+                                pending_rid_update =
+                                    Some((group_id.clone(), old_rid, new_rid));
+                                break;
+                            }
+                        }
+                    }
+                    String::from_utf8_lossy(&app_bytes).to_string()
                 }
                 _ => "non-application MLS message".to_string(),
             };
 
             decrypted_line = Some((group_id.clone(), text));
             break;
+        }
+        
+        // handle the rid update extracted from the mls message
+        if let Some((group_id, old_rid, new_rid)) = pending_rid_update {
+            if self.apply_remote_rid_update(&group_id, &old_rid, &new_rid)? {
+                self.log(format!(
+                    "Updated member RID in group {} from {} to {}.",
+                    short_group_id(&group_id),
+                    old_rid,
+                    new_rid
+                ));
+            }
+            return Ok(());
         }
 
         if let Some((group_id, line)) = decrypted_line {
@@ -968,6 +997,8 @@ impl ClientState {
             }
         }
 
+        self.broadcast_rid_update_via_mls(&old_rid, &new_rid)?;
+
         if reissued {
             self.log(format!(
                 "Previous RID expired. Issued new RID {}.",
@@ -976,10 +1007,120 @@ impl ClientState {
         } else {
             self.log(format!("Rotated RID from {} to {}.", old_rid, new_rid));
         }
-        self.log("Share your new RID with contacts so future messages target the updated relay identity.");
-        // TODO: just use MLS to update the rid
+
         self.save_persisted_state()?;
         Ok(())
+    }
+
+    fn broadcast_rid_update_via_mls(&mut self, old_rid: &str, new_rid: &str) -> Result<()> {
+        let payload = serde_cbor::to_vec(&GroupControlEnvelope {
+            magic: GROUP_CONTROL_MAGIC,
+            payload: GroupControlPayload::RidUpdated {
+                old_rid: old_rid.to_string(),
+                new_rid: new_rid.to_string(),
+            },
+        })
+        .context("encoding group control RID update payload failed")?;
+
+        let group_ids = self.conversations.keys().cloned().collect::<Vec<_>>();
+        for group_id in group_ids {
+            let recipients = self
+                .conversation_members
+                .get(&group_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|rid| rid.as_str() != self.my_rid.as_str())
+                .collect::<Vec<_>>();
+
+            if recipients.is_empty() {
+                continue;
+            }
+
+            let out = {
+                let Some(group) = self.conversations.get_mut(&group_id) else {
+                    continue;
+                };
+                match mls::send_application_message(
+                    group,
+                    &self.identity.provider,
+                    &self.identity.signer,
+                    &payload,
+                ) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        self.log(format!(
+                            "Could not create RID update MLS message for group {}: {}",
+                            short_group_id(&group_id),
+                            err
+                        ));
+                        continue;
+                    }
+                }
+            };
+
+            let ciphertext = match mls::mls_message_out_to_bytes(&out) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    self.log(format!(
+                        "Could not serialize RID update MLS message for group {}: {}",
+                        short_group_id(&group_id),
+                        err
+                    ));
+                    continue;
+                }
+            };
+
+            for recipient_rid in recipients {
+                let blob = EncryptedBlob::new(recipient_rid.clone(), ciphertext.clone());
+                match send_client_packet(&self.server_addr, ClientPacket::PutBlob { blob })? {
+                    ServerPacket::Accepted { .. } => {}
+                    ServerPacket::Error { message } => {
+                        self.log(format!(
+                            "Server rejected RID update to {}: {message}",
+                            recipient_rid
+                        ));
+                    }
+                    other => {
+                        self.log(format!(
+                            "Unexpected response on RID update to {}: {other:#?}",
+                            recipient_rid
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_remote_rid_update(
+        &mut self,
+        group_id: &str,
+        old_rid: &str,
+        new_rid: &str,
+    ) -> Result<bool> {
+        let Some(members) = self.conversation_members.get_mut(group_id) else {
+            return Ok(false);
+        };
+
+        let had_old = members.iter().any(|rid| rid.as_str() == old_rid);
+        if !had_old {
+            return Ok(false);
+        }
+
+        if members.iter().any(|rid| rid.as_str() == new_rid) {
+            members.retain(|rid| rid.as_str() != old_rid);
+        } else {
+            for rid in members.iter_mut() {
+                if rid.as_str() == old_rid {
+                    *rid = new_rid.to_string();
+                }
+            }
+        }
+
+        self.save_persisted_state()?;
+        Ok(true)
     }
 
     fn log(&mut self, line: impl Into<String>) {
@@ -1017,6 +1158,20 @@ enum BootstrapPayload {
         group_id: String,
         added_rid: Option<String>,
         commit: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GroupControlEnvelope {
+    magic: u32,
+    payload: GroupControlPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum GroupControlPayload {
+    RidUpdated {
+        old_rid: String,
+        new_rid: String,
     },
 }
 
