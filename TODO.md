@@ -1,5 +1,4 @@
 - keeping more mls state locally
-- on first launch, confirm the password by having the user enter it twice
 - generate tokens that can contain the keyserver handle as well as the rid
 - keeping message history locally (configurable)
 - have message history be group specific
