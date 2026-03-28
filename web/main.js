@@ -18,6 +18,7 @@ const elements = {
   messageInput: document.querySelector('#messageInput'),
   sendButton: document.querySelector('#sendButton'),
   ridValue: document.querySelector('#ridValue'),
+  myTokenValue: document.querySelector('#myTokenValue'),
   rotateRidButton: document.querySelector('#rotateRidButton'),
   createGroupButton: document.querySelector('#createGroupButton'),
   toggleInviteButton: document.querySelector('#toggleInviteButton'),
@@ -112,6 +113,7 @@ function renderStatus(snapshot) {
   elements.connectionSummary.textContent = `${snapshot.myRid}@${snapshot.serverAddr}`;
   elements.activeGroupTitle.textContent = snapshot.activeGroupTitle;
   elements.ridValue.textContent = snapshot.myRid;
+  elements.myTokenValue.textContent = snapshot.myToken;
 
   elements.inviteBar.hidden = !snapshot.pendingOfferFrom;
   if (snapshot.pendingOfferFrom) {

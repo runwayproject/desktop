@@ -12,6 +12,7 @@ use openmls::group::GroupId;
 use openmls::prelude::{KeyPackage, MlsGroup, MlsGroupJoinConfig, ProcessedMessageContent};
 use openmls_traits::OpenMlsProvider;
 use rand::RngExt;
+use runway_token::token::parse_token;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -88,6 +89,7 @@ pub struct ConversationSummary {
 pub struct ClientSnapshot {
     pub server_addr: String,
     pub my_rid: String,
+    pub my_token: String,
     pub active_group_id: Option<String>,
     pub active_group_title: String,
     pub pending_offer_from: Option<String>,
@@ -333,6 +335,7 @@ impl ClientState {
         ClientSnapshot {
             server_addr: self.server_addr.clone(),
             my_rid: self.my_rid.clone(),
+            my_token: self.build_self_token(),
             active_group_id: self.active_group_id.clone(),
             active_group_title,
             pending_offer_from: self.pending_offer_from.clone(),
@@ -358,10 +361,7 @@ impl ClientState {
     }
 
     pub fn add_peer(&mut self, target_rid: String) -> Result<()> {
-        let target_rid = target_rid.trim().to_string();
-        if target_rid.is_empty() {
-            bail!("peer RID cannot be empty")
-        }
+        let target_rid = normalize_recipient_input(&target_rid, &self.server_addr)?;
 
         let key_package = mls::build_keypackage(&self.identity)?;
         let key_package_bytes = mls::keypackage_to_bytes(&key_package)?;
@@ -379,10 +379,7 @@ impl ClientState {
     }
 
     pub fn add_member(&mut self, member_rid: String) -> Result<()> {
-        let member_rid = member_rid.trim().to_string();
-        if member_rid.is_empty() {
-            bail!("member RID cannot be empty")
-        }
+        let member_rid = normalize_recipient_input(&member_rid, &self.server_addr)?;
 
         let active = self
             .active_group_id
@@ -1137,6 +1134,10 @@ impl ClientState {
         }
         self.activity.push_back(line.into());
     }
+
+    fn build_self_token(&self) -> String {
+        format!("runway::v1::{}@{}", self.my_rid, self.server_addr)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1196,6 +1197,35 @@ fn random_group_id() -> String {
         let _ = write!(&mut id, "{:02x}", byte);
     }
     id
+}
+
+fn normalize_recipient_input(input: &str, local_relay: &str) -> Result<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("recipient RID cannot be empty")
+    }
+
+    if !trimmed.starts_with("runway::") {
+        return Ok(trimmed.to_string());
+    }
+
+    let token = parse_token(trimmed).map_err(|err| anyhow::anyhow!("invalid runway token: {err}"))?;
+
+    // we do this because right now we don't have federation
+    // TODO: federation
+    if token.relay != local_relay {
+        bail!(
+            "token relay {} does not match connected relay {}",
+            token.relay,
+            local_relay
+        )
+    }
+
+    if token.keyserver.is_some() {
+        bail!("keyserver segment in token is not supported yet")
+    }
+
+    Ok(token.rid)
 }
 
 fn extract_identity_bytes(credential_with_key: &openmls::prelude::CredentialWithKey) -> Vec<u8> {

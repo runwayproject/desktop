@@ -1,5 +1,4 @@
 - keeping more mls state locally
-- generate tokens that can contain the keyserver handle as well as the rid
 - keeping message history locally (configurable)
 - have message history be group specific
 - direct messages
@@ -7,11 +6,11 @@
 - group management (add/remove members, change group name/topic)
 - group invitations
 - mls extension for group topics/names
-- use keyserver
+- use keyserver (in token too)
 - configuration
 - show member count 
 - show group topic
 - show group name
 - set nicknames for members
 - multiple identities
-
+- support federation

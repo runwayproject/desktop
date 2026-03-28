@@ -108,6 +108,7 @@ dependencies = [
  "openmls_traits",
  "rand 0.10.0",
  "rpassword",
+ "runway-token",
  "serde",
  "serde_cbor",
  "sha2",
@@ -3720,6 +3721,12 @@ dependencies = [
  "libc",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "runway-token"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359249d7e515f65594f8c578feb63ea310387e3155d5a6575b0684749402922"
 
 [[package]]
 name = "rustc-hash"

@@ -52,7 +52,7 @@
           <button id="toggleInviteButton" class="panel-action" type="button">Invite</button>
         </div>
         <form id="addMemberForm" class="members-invite-form hidden">
-          <input id="memberRidInput" type="text" placeholder="Member RID" autocomplete="off" />
+          <input id="memberRidInput" type="text" placeholder="Token" autocomplete="off" />
           <button id="addMemberButton" type="submit">Send</button>
         </form>
         <div id="membersList" class="members-list empty-state">No members</div>
@@ -64,6 +64,8 @@
         <h2>Your Identity</h2>
         <p class="fact-label">Relay ID</p>
         <p id="ridValue" class="mono">Loading...</p>
+        <p class="fact-label">Token</p>
+        <p id="myTokenValue" class="mono">Loading...</p>
         <div class="identity-actions">
           <button id="rotateRidButton" type="button">Rotate RID</button>
         </div>
