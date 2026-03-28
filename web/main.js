@@ -19,6 +19,7 @@ const elements = {
   sendButton: document.querySelector('#sendButton'),
   ridValue: document.querySelector('#ridValue'),
   myTokenValue: document.querySelector('#myTokenValue'),
+  copyTokenButton: document.querySelector('#copyTokenButton'),
   rotateRidButton: document.querySelector('#rotateRidButton'),
   createGroupButton: document.querySelector('#createGroupButton'),
   toggleInviteButton: document.querySelector('#toggleInviteButton'),
@@ -210,6 +211,21 @@ elements.clearActivityButton.addEventListener('click', () => {
 
 elements.rotateRidButton.addEventListener('click', () => {
   void invokeCommand('rotate_rid');
+});
+
+elements.copyTokenButton.addEventListener('click', async () => {
+  const token = state.snapshot?.myToken?.trim();
+  if (!token) {
+    showToast('Token is not ready yet.');
+    return;
+  }
+
+  try {
+    await navigator.clipboard.writeText(token);
+    showToast('Token copied to clipboard.');
+  } catch {
+    showToast('Unable to copy token.');
+  }
 });
 
 elements.acceptInviteButton.addEventListener('click', () => {
