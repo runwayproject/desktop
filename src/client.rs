@@ -550,6 +550,9 @@ impl ClientState {
             bail!("unknown group {group_id}")
         }
 
+        // clear chat when switching groups
+        // TODO: load the new group's chat history instead of just clearing it
+        self.activity.clear();
         self.active_group_id = Some(group_id.clone());
         self.save_persisted_state()?;
         Ok(())
