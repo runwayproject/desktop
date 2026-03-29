@@ -179,10 +179,11 @@ function renderMembers(snapshot) {
 
   el.className = 'members-list';
   el.innerHTML = '';
+  const myCanonicalRid = `${snapshot.myRid}@${snapshot.serverAddr}`;
   snapshot.members.forEach((m) => {
     const div = document.createElement('div');
     div.className = 'member-item';
-    div.textContent = m === snapshot.myRid ? `${m} (you)` : m;
+    div.textContent = m === snapshot.myRid || m === myCanonicalRid ? `${m} (you)` : m;
     el.append(div);
   });
 }

@@ -49,6 +49,12 @@ pub struct ClientState {
     state_key: [u8; PERSISTENCE_KEY_LEN],
 }
 
+#[derive(Debug, Clone)]
+struct RecipientEndpoint {
+    rid: String,
+    relay: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedClientState {
     version: u32,
@@ -105,6 +111,15 @@ impl ClientState {
         let passphrase = acquire_state_passphrase(is_first_launch)?;
 
         if let Some(state) = Self::load_persisted_state(passphrase.as_str())? {
+            if !relay_eq(&state.server_addr, &server_addr) {
+                let path = persistence_path();
+                bail!(
+                    "persisted state is bound to relay {} but requested {}. remove {:?} to start fresh on a new relay",
+                    state.server_addr,
+                    server_addr,
+                    path
+                )
+            }
             return Ok(state);
         }
 
@@ -202,11 +217,28 @@ impl ClientState {
             .active_group_id
             .filter(|group_id| conversations.contains_key(group_id));
 
+        let server_addr = persisted.server_addr.clone();
+        let mut conversation_members: HashMap<String, Vec<String>> = HashMap::new();
+        for (group_id, members) in persisted.conversation_members {
+            let mut normalized_members = Vec::new();
+            for member in members {
+                if let Some(normalized) = normalize_recipient_for_storage(&member, &server_addr)
+                    && !normalized_members.contains(&normalized)
+                {
+                    normalized_members.push(normalized);
+                }
+            }
+            conversation_members.insert(group_id, normalized_members);
+        }
+
         let mut pending_keypackages: HashMap<String, KeyPackage> = HashMap::new();
         for (rid, kp_bytes) in persisted.pending_keypackages {
             match mls::bytes_to_keypackage(&identity.provider, &kp_bytes) {
                 Ok(kp) => {
-                    pending_keypackages.insert(rid, kp);
+                    if let Some(normalized_rid) = normalize_recipient_for_storage(&rid, &server_addr)
+                    {
+                        pending_keypackages.insert(normalized_rid, kp);
+                    }
                 }
                 Err(_) => {}
             }
@@ -215,7 +247,10 @@ impl ClientState {
         for (rid, kp_bytes) in persisted.pending_keypackages_to_send {
             match mls::bytes_to_keypackage(&identity.provider, &kp_bytes) {
                 Ok(kp) => {
-                    pending_keypackage_requests.insert(rid, kp);
+                    if let Some(normalized_rid) = normalize_recipient_for_storage(&rid, &server_addr)
+                    {
+                        pending_keypackage_requests.insert(normalized_rid, kp);
+                    }
                 }
                 Err(_) => {}
             }
@@ -223,23 +258,30 @@ impl ClientState {
         let pending_group_additions: HashMap<String, String> = persisted
             .pending_group_additions
             .into_iter()
-            .filter(|(_, group_id)| conversations.contains_key(group_id.as_str()))
+            .filter_map(|(rid, group_id)| {
+                if !conversations.contains_key(group_id.as_str()) {
+                    return None;
+                }
+                normalize_recipient_for_storage(&rid, &server_addr)
+                    .map(|normalized| (normalized, group_id))
+            })
             .collect();
         let pending_offer_from = persisted
             .pending_offer_from
+            .and_then(|rid| normalize_recipient_for_storage(&rid, &server_addr))
             .filter(|rid| {
                 pending_keypackages.contains_key(rid.as_str())
                     || pending_keypackage_requests.contains_key(rid.as_str())
             });
 
         let mut state = Self {
-            server_addr: persisted.server_addr,
+            server_addr,
             signing_key,
             my_rid: persisted.my_rid,
             activity: VecDeque::new(),
             identity,
             conversations,
-            conversation_members: persisted.conversation_members,
+            conversation_members,
             pending_keypackages,
             pending_keypackage_requests,
             pending_group_additions,
@@ -350,7 +392,7 @@ impl ClientState {
         let group = mls::create_group(&self.identity);
         self.conversations.insert(group_id.clone(), group);
         self.conversation_members
-            .insert(group_id.clone(), vec![self.my_rid.clone()]);
+            .insert(group_id.clone(), vec![self.qualified_my_rid()]);
         self.active_group_id = Some(group_id.clone());
         self.log(format!(
             "Created group {}. Invite members from the Groups view.",
@@ -368,7 +410,7 @@ impl ClientState {
         let envelope = BootstrapEnvelope {
             magic: BOOTSTRAP_MAGIC,
             payload: BootstrapPayload::KeyPackageOffer {
-                from_rid: self.my_rid.clone(),
+                from_rid: self.qualified_my_rid(),
                 key_package: key_package_bytes,
             },
         };
@@ -406,7 +448,7 @@ impl ClientState {
                 let envelope = BootstrapEnvelope {
                     magic: BOOTSTRAP_MAGIC,
                     payload: BootstrapPayload::KeyPackageRequest {
-                        from_rid: self.my_rid.clone(),
+                        from_rid: self.qualified_my_rid(),
                     },
                 };
 
@@ -433,7 +475,7 @@ impl ClientState {
             .conversation_members
             .get(&group_id)
             .cloned()
-            .unwrap_or_else(|| vec![self.my_rid.clone()]);
+            .unwrap_or_else(|| vec![self.qualified_my_rid()]);
 
         let (commit, welcome, ratchet_tree) = {
             let group = self
@@ -460,7 +502,7 @@ impl ClientState {
         let envelope = BootstrapEnvelope {
             magic: BOOTSTRAP_MAGIC,
             payload: BootstrapPayload::Welcome {
-                from_rid: self.my_rid.clone(),
+                from_rid: self.qualified_my_rid(),
                 group_id: group_id.clone(),
                 members: updated_members.clone(),
                 ratchet_tree,
@@ -473,7 +515,7 @@ impl ClientState {
         let commit_recipients = current_members
             .iter()
             .filter(|rid| {
-                rid.as_str() != self.my_rid.as_str() && rid.as_str() != member_rid.as_str()
+                !self.rid_matches_self(rid) && rid.as_str() != member_rid.as_str()
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -482,7 +524,7 @@ impl ClientState {
             let envelope = BootstrapEnvelope {
                 magic: BOOTSTRAP_MAGIC,
                 payload: BootstrapPayload::GroupCommit {
-                    from_rid: self.my_rid.clone(),
+                    from_rid: self.qualified_my_rid(),
                     group_id: group_id.clone(),
                     added_rid: Some(member_rid.clone()),
                     commit: commit_bytes.clone(),
@@ -555,7 +597,7 @@ impl ClientState {
             let envelope = BootstrapEnvelope {
                 magic: BOOTSTRAP_MAGIC,
                 payload: BootstrapPayload::KeyPackageOffer {
-                    from_rid: self.my_rid.clone(),
+                    from_rid: self.qualified_my_rid(),
                     key_package: key_package_bytes,
                 },
             };
@@ -610,18 +652,27 @@ impl ClientState {
             .conversation_members
             .get(&target)
             .cloned()
-            .unwrap_or_else(|| vec![target.clone()]);
+            .unwrap_or_else(|| vec![self.qualified_my_rid()]);
 
-        let mut delivered = Vec::new();
         for recipient_rid in recipients {
-            if recipient_rid == self.my_rid {
+            if self.rid_matches_self(&recipient_rid) {
                 continue;
             }
 
-            let blob = EncryptedBlob::new(recipient_rid.clone(), ciphertext.clone());
-            match send_client_packet(&self.server_addr, ClientPacket::PutBlob { blob })? {
-                ServerPacket::Accepted { rid, .. } => {
-                    delivered.push(rid);
+            let endpoint = match resolve_recipient_endpoint(&recipient_rid, &self.server_addr) {
+                Ok(endpoint) => endpoint,
+                Err(err) => {
+                    self.log(format!(
+                        "Could not resolve recipient {}: {}",
+                        recipient_rid, err
+                    ));
+                    continue;
+                }
+            };
+
+            let blob = EncryptedBlob::new(endpoint.rid.clone(), ciphertext.clone());
+            match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
+                ServerPacket::Accepted { .. } => {
                 }
                 ServerPacket::Error { message } => {
                     self.log(format!(
@@ -723,9 +774,9 @@ impl ClientState {
         let envelope = BootstrapEnvelope {
             magic: BOOTSTRAP_MAGIC,
             payload: BootstrapPayload::Welcome {
-                from_rid: self.my_rid.clone(),
+                from_rid: self.qualified_my_rid(),
                 group_id: group_id.clone(),
-                members: vec![self.my_rid.clone(), target.clone()],
+                members: vec![self.qualified_my_rid(), target.clone()],
                 ratchet_tree,
                 welcome: welcome_bytes,
             },
@@ -734,7 +785,7 @@ impl ClientState {
         self.send_bootstrap_envelope(envelope, target.clone())?;
         self.conversations.insert(group_id.clone(), group);
         self.conversation_members
-            .insert(group_id.clone(), vec![self.my_rid.clone(), target.clone()]);
+            .insert(group_id.clone(), vec![self.qualified_my_rid(), target.clone()]);
         self.active_group_id = Some(group_id.clone());
         self.log(format!(
             "Created group {} and invited {}.",
@@ -819,6 +870,7 @@ impl ClientState {
     fn handle_bootstrap_envelope(&mut self, envelope: BootstrapEnvelope) -> Result<()> {
         match envelope.payload {
             BootstrapPayload::KeyPackageRequest { from_rid } => {
+                let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
                 // ask the user to accept or reject it
                 let key_package = mls::build_keypackage(&self.identity)?;
                 self.pending_keypackage_requests
@@ -833,6 +885,7 @@ impl ClientState {
                 from_rid,
                 key_package,
             } => {
+                let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
                 let kp = mls::bytes_to_keypackage(&self.identity.provider, &key_package)?;
                 if let Some(group_id) = self.pending_group_additions.remove(&from_rid) {
                     self.finalize_add_member(group_id.clone(), from_rid.clone(), kp)?;
@@ -857,6 +910,15 @@ impl ClientState {
                 ratchet_tree,
                 welcome,
             } => {
+                let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
+                let mut normalized_members = Vec::new();
+                for member in members {
+                    let normalized = normalize_recipient_input(&member, &self.server_addr)?;
+                    if !normalized_members.contains(&normalized) {
+                        normalized_members.push(normalized);
+                    }
+                }
+
                 let welcome = mls::bytes_to_welcome(&welcome)?;
                 let ratchet_tree = mls::bytes_to_ratchet_tree(&ratchet_tree)?;
                 let join_cfg = MlsGroupJoinConfig::builder().build();
@@ -867,7 +929,8 @@ impl ClientState {
                     Some(ratchet_tree),
                 )?;
                 self.conversations.insert(group_id.clone(), group);
-                self.conversation_members.insert(group_id.clone(), members);
+                self.conversation_members
+                    .insert(group_id.clone(), normalized_members);
                 self.active_group_id = Some(group_id.clone());
                 self.log(format!(
                     "Joined group {} from {}. You can now chat.",
@@ -882,6 +945,7 @@ impl ClientState {
                 added_rid,
                 commit,
             } => {
+                let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
                 let pm = mls::bytes_to_protocol_message(&commit)?;
                 let updated_group = self
                     .conversations
@@ -898,10 +962,12 @@ impl ClientState {
                         *staged_commit,
                     )?;
                     if let Some(added_rid) = added_rid {
+                        let added_rid = normalize_recipient_input(&added_rid, &self.server_addr)?;
+                        let my_qualified_rid = self.qualified_my_rid();
                         let members = self
                             .conversation_members
                             .entry(group_id.clone())
-                            .or_insert_with(|| vec![self.my_rid.clone()]);
+                            .or_insert_with(|| vec![my_qualified_rid.clone()]);
                         if !members.contains(&added_rid) {
                             members.push(added_rid.clone());
                         }
@@ -943,7 +1009,7 @@ impl ClientState {
 
         let others = members
             .iter()
-            .filter(|rid| rid.as_str() != self.my_rid.as_str())
+            .filter(|rid| !self.rid_matches_self(rid))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -965,8 +1031,9 @@ impl ClientState {
     ) -> Result<()> {
         let payload =
             serde_cbor::to_vec(&envelope).context("encoding bootstrap envelope failed")?;
-        let blob = EncryptedBlob::new(recipient_rid, payload);
-        match send_client_packet(&self.server_addr, ClientPacket::PutBlob { blob })? {
+        let endpoint = resolve_recipient_endpoint(&recipient_rid, &self.server_addr)?;
+        let blob = EncryptedBlob::new(endpoint.rid, payload);
+        match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
             ServerPacket::Accepted { .. } => Ok(()),
             ServerPacket::Error { message } => Err(anyhow::anyhow!(message)),
             other => Err(anyhow::anyhow!(
@@ -992,17 +1059,19 @@ impl ClientState {
     }
 
     fn apply_new_rid(&mut self, old_rid: String, new_rid: String, reissued: bool) -> Result<()> {
+        let old_public = rid_with_relay(&old_rid, &self.server_addr);
+        let new_public = rid_with_relay(&new_rid, &self.server_addr);
         self.my_rid = new_rid.clone();
 
         for members in self.conversation_members.values_mut() {
             for rid in members.iter_mut() {
-                if rid.as_str() == old_rid.as_str() {
-                    *rid = new_rid.clone();
+                if rid.as_str() == old_rid.as_str() || rid.as_str() == old_public.as_str() {
+                    *rid = new_public.clone();
                 }
             }
         }
 
-        self.broadcast_rid_update_via_mls(&old_rid, &new_rid)?;
+        self.broadcast_rid_update_via_mls(&old_public, &new_public)?;
 
         if reissued {
             self.log(format!(
@@ -1035,7 +1104,7 @@ impl ClientState {
                 .cloned()
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|rid| rid.as_str() != self.my_rid.as_str())
+                .filter(|rid| !self.rid_matches_self(rid))
                 .collect::<Vec<_>>();
 
             if recipients.is_empty() {
@@ -1077,8 +1146,19 @@ impl ClientState {
             };
 
             for recipient_rid in recipients {
-                let blob = EncryptedBlob::new(recipient_rid.clone(), ciphertext.clone());
-                match send_client_packet(&self.server_addr, ClientPacket::PutBlob { blob })? {
+                let endpoint = match resolve_recipient_endpoint(&recipient_rid, &self.server_addr)
+                {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        self.log(format!(
+                            "Could not resolve RID update recipient {}: {}",
+                            recipient_rid, err
+                        ));
+                        continue;
+                    }
+                };
+                let blob = EncryptedBlob::new(endpoint.rid, ciphertext.clone());
+                match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
                     ServerPacket::Accepted { .. } => {}
                     ServerPacket::Error { message } => {
                         self.log(format!(
@@ -1109,17 +1189,33 @@ impl ClientState {
             return Ok(false);
         };
 
-        let had_old = members.iter().any(|rid| rid.as_str() == old_rid);
+        let normalized_old = normalize_recipient_for_storage(old_rid, &self.server_addr)
+            .unwrap_or_else(|| old_rid.trim().to_string());
+        let normalized_new = normalize_recipient_for_storage(new_rid, &self.server_addr)
+            .unwrap_or_else(|| new_rid.trim().to_string());
+
+        if normalized_old.is_empty() || normalized_new.is_empty() {
+            return Ok(false);
+        }
+
+        let had_old = members
+            .iter()
+            .any(|rid| rid.as_str() == old_rid || rid.as_str() == normalized_old.as_str());
         if !had_old {
             return Ok(false);
         }
 
-        if members.iter().any(|rid| rid.as_str() == new_rid) {
-            members.retain(|rid| rid.as_str() != old_rid);
+        if members
+            .iter()
+            .any(|rid| rid.as_str() == new_rid || rid.as_str() == normalized_new.as_str())
+        {
+            members.retain(|rid| {
+                rid.as_str() != old_rid && rid.as_str() != normalized_old.as_str()
+            });
         } else {
             for rid in members.iter_mut() {
-                if rid.as_str() == old_rid {
-                    *rid = new_rid.to_string();
+                if rid.as_str() == old_rid || rid.as_str() == normalized_old.as_str() {
+                    *rid = normalized_new.clone();
                 }
             }
         }
@@ -1135,8 +1231,16 @@ impl ClientState {
         self.activity.push_back(line.into());
     }
 
+    fn qualified_my_rid(&self) -> String {
+        rid_with_relay(&self.my_rid, &self.server_addr)
+    }
+
+    fn rid_matches_self(&self, rid: &str) -> bool {
+        recipient_matches_self(rid, &self.my_rid, &self.server_addr)
+    }
+
     fn build_self_token(&self) -> String {
-        format!("runway::v1::{}@{}", self.my_rid, self.server_addr)
+        format!("runway::v1::{}", self.qualified_my_rid())
     }
 }
 
@@ -1200,32 +1304,83 @@ fn random_group_id() -> String {
 }
 
 fn normalize_recipient_input(input: &str, local_relay: &str) -> Result<String> {
+    let endpoint = resolve_recipient_endpoint(input, local_relay)?;
+    Ok(rid_with_relay(&endpoint.rid, &endpoint.relay))
+}
+
+fn normalize_recipient_for_storage(input: &str, local_relay: &str) -> Option<String> {
+    resolve_recipient_endpoint(input, local_relay)
+        .ok()
+        .map(|endpoint| rid_with_relay(&endpoint.rid, &endpoint.relay))
+}
+
+fn resolve_recipient_endpoint(input: &str, local_relay: &str) -> Result<RecipientEndpoint> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         bail!("recipient RID cannot be empty")
     }
 
-    if !trimmed.starts_with("runway::") {
-        return Ok(trimmed.to_string());
+    if trimmed.starts_with("runway::") {
+        let token =
+            parse_token(trimmed).map_err(|err| anyhow::anyhow!("invalid runway token: {err}"))?;
+        if token.keyserver.is_some() {
+            bail!("keyserver segment in token is not supported yet")
+        }
+        return build_recipient_endpoint(&token.rid, &token.relay);
     }
 
-    let token = parse_token(trimmed).map_err(|err| anyhow::anyhow!("invalid runway token: {err}"))?;
-
-    // we do this because right now we don't have federation
-    // TODO: federation
-    if token.relay != local_relay {
-        bail!(
-            "token relay {} does not match connected relay {}",
-            token.relay,
-            local_relay
-        )
+    if let Some((rid, relay)) = split_rid_and_relay(trimmed) {
+        return build_recipient_endpoint(rid, relay);
     }
 
-    if token.keyserver.is_some() {
-        bail!("keyserver segment in token is not supported yet")
+    build_recipient_endpoint(trimmed, local_relay)
+}
+
+fn recipient_matches_self(recipient: &str, my_rid: &str, local_relay: &str) -> bool {
+    match resolve_recipient_endpoint(recipient, local_relay) {
+        Ok(endpoint) => endpoint.rid == my_rid && relay_eq(&endpoint.relay, local_relay),
+        Err(_) => recipient.trim() == my_rid,
+    }
+}
+
+fn split_rid_and_relay(value: &str) -> Option<(&str, &str)> {
+    let at = value.rfind('@')?;
+    let rid = value[..at].trim();
+    let relay = value[at + 1..].trim();
+    if rid.is_empty() || relay.is_empty() {
+        return None;
+    }
+    Some((rid, relay))
+}
+
+fn build_recipient_endpoint(rid: &str, relay: &str) -> Result<RecipientEndpoint> {
+    let rid = rid.trim();
+    let relay = relay.trim();
+    if rid.is_empty() {
+        bail!("recipient RID cannot be empty")
+    }
+    if relay.is_empty() {
+        bail!("recipient relay cannot be empty")
+    }
+    if rid.contains('@') {
+        bail!("recipient RID segment must not contain '@'")
+    }
+    if relay.contains('@') {
+        bail!("recipient relay must not contain '@'")
     }
 
-    Ok(token.rid)
+    Ok(RecipientEndpoint {
+        rid: rid.to_string(),
+        relay: relay.to_string(),
+    })
+}
+
+fn rid_with_relay(rid: &str, relay: &str) -> String {
+    format!("{}@{}", rid, relay)
+}
+
+fn relay_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
 fn extract_identity_bytes(credential_with_key: &openmls::prelude::CredentialWithKey) -> Vec<u8> {

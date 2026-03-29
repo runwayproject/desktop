@@ -13,4 +13,4 @@
 - show group name
 - set nicknames for members
 - multiple identities
-- support federation
+- leave groups feature
