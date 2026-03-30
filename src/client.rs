@@ -26,7 +26,7 @@ use zeroize::{Zeroize, Zeroizing};
 const MAX_ACTIVITY: usize = 200;
 const BOOTSTRAP_MAGIC: u32 = 0x52575931;
 const GROUP_CONTROL_MAGIC: u32 = 0x52575932;
-const PERSISTENCE_VERSION: u32 = 1;
+const PERSISTENCE_VERSION: u32 = 2; // group-specific messages so bump
 const PERSISTENCE_ENVELOPE_VERSION: u32 = 1;
 const PERSISTENCE_SALT_LEN: usize = 16;
 const PERSISTENCE_NONCE_LEN: usize = 12;
@@ -36,7 +36,7 @@ pub struct ClientState {
     server_addr: String,
     signing_key: SigningKey,
     my_rid: String,
-    activity: VecDeque<String>,
+    activity_by_group: HashMap<String, VecDeque<String>>,
     identity: mls::IdentityBundle,
     conversations: HashMap<String, openmls::group::MlsGroup>,
     conversation_members: HashMap<String, Vec<String>>,
@@ -66,6 +66,7 @@ struct PersistedClientState {
     storage_values: HashMap<Vec<u8>, Vec<u8>>,
     conversation_group_ids: HashMap<String, Vec<u8>>,
     conversation_members: HashMap<String, Vec<String>>,
+    activity_by_group: HashMap<String, Vec<String>>,
     active_group_id: Option<String>,
     pending_keypackages: HashMap<String, Vec<u8>>,
     pending_keypackages_to_send: HashMap<String, Vec<u8>>,
@@ -143,7 +144,7 @@ impl ClientState {
             server_addr,
             signing_key,
             my_rid: rid,
-            activity: VecDeque::new(),
+            activity_by_group: HashMap::new(),
             identity: mls::create_identity(),
             conversations: HashMap::new(),
             conversation_members: HashMap::new(),
@@ -184,7 +185,12 @@ impl ClientState {
         plaintext.zeroize();
 
         if persisted.version != PERSISTENCE_VERSION {
-            return Ok(None);
+            bail!(
+                "persisted state version {} is unsupported (expected {}); remove {:?} to start fresh or use an older version of Asphalt.",
+                persisted.version,
+                PERSISTENCE_VERSION,
+                path
+            )
         }
 
         if persisted.transport_signing_key.len() != 32 {
@@ -229,6 +235,13 @@ impl ClientState {
                 }
             }
             conversation_members.insert(group_id, normalized_members);
+        }
+
+        let mut activity_by_group: HashMap<String, VecDeque<String>> = HashMap::new();
+        for (group_id, activity) in persisted.activity_by_group {
+            if conversations.contains_key(group_id.as_str()) {
+                activity_by_group.insert(group_id, activity.into_iter().collect());
+            }
         }
 
         let mut pending_keypackages: HashMap<String, KeyPackage> = HashMap::new();
@@ -278,7 +291,7 @@ impl ClientState {
             server_addr,
             signing_key,
             my_rid: persisted.my_rid,
-            activity: VecDeque::new(),
+            activity_by_group,
             identity,
             conversations,
             conversation_members,
@@ -299,6 +312,11 @@ impl ClientState {
         let mut conversation_group_ids = HashMap::new();
         for (app_group_id, group) in &self.conversations {
             conversation_group_ids.insert(app_group_id.clone(), group.group_id().to_vec());
+        }
+
+        let mut activity_by_group = HashMap::new();
+        for (group_id, activity) in &self.activity_by_group {
+            activity_by_group.insert(group_id.clone(), activity.iter().cloned().collect());
         }
 
         let storage_values = self
@@ -334,6 +352,7 @@ impl ClientState {
             storage_values,
             conversation_group_ids,
             conversation_members: self.conversation_members.clone(),
+            activity_by_group,
             active_group_id: self.active_group_id.clone(),
             pending_keypackages: pending_keypackages_bytes,
             pending_keypackages_to_send: pending_keypackages_to_send,
@@ -374,6 +393,13 @@ impl ClientState {
             .map(|group_id| self.conversation_title(group_id))
             .unwrap_or_else(|| "No group selected".to_string());
 
+        let activity = self
+            .active_group_id
+            .as_ref()
+            .and_then(|group_id| self.activity_by_group.get(group_id))
+            .map(|history| history.iter().cloned().collect())
+            .unwrap_or_default();
+
         ClientSnapshot {
             server_addr: self.server_addr.clone(),
             my_rid: self.my_rid.clone(),
@@ -382,7 +408,7 @@ impl ClientState {
             active_group_title,
             pending_offer_from: self.pending_offer_from.clone(),
             conversations: self.sorted_conversations(),
-            activity: self.activity.iter().cloned().collect(),
+            activity,
             members,
         }
     }
@@ -550,17 +576,15 @@ impl ClientState {
             bail!("unknown group {group_id}")
         }
 
-        // clear chat when switching groups
-        // TODO: load the new group's chat history instead of just clearing it
-        self.activity.clear();
         self.active_group_id = Some(group_id.clone());
         self.save_persisted_state()?;
         Ok(())
     }
 
     pub fn clear_activity(&mut self) {
-        self.activity.clear();
-        self.log("Activity cleared.");
+        if let Some(active_group_id) = self.active_group_id.clone() {
+            self.activity_by_group.remove(&active_group_id);
+        }
     }
 
     pub fn rotate_rid(&mut self) -> Result<()> {
@@ -692,11 +716,14 @@ impl ClientState {
             }
         }
 
-        self.log(format!(
+        self.log_for_group(
+            &target,
+            format!(
             "You (group {}): {}",
             short_group_id(&target),
             clean
-        ));
+        ),
+        );
 
         self.save_persisted_state()?;
 
@@ -847,19 +874,25 @@ impl ClientState {
         // handle the rid update extracted from the mls message
         if let Some((group_id, old_rid, new_rid)) = pending_rid_update {
             if self.apply_remote_rid_update(&group_id, &old_rid, &new_rid)? {
-                self.log(format!(
+                self.log_for_group(
+                    &group_id,
+                    format!(
                     "Updated member RID in group {} from {} to {}.",
                     short_group_id(&group_id),
                     old_rid,
                     new_rid
-                ));
+                ),
+                );
             }
             return Ok(());
         }
 
         if let Some((group_id, line)) = decrypted_line {
             self.active_group_id = Some(group_id.clone());
-            self.log(format!("[{}] {}", self.conversation_title(&group_id), line));
+            self.log_for_group(
+                &group_id,
+                format!("[{}] {}", self.conversation_title(&group_id), line),
+            );
         } else {
             self.log(format!(
                 "Received {} bytes, but no local group could decrypt it.",
@@ -974,18 +1007,24 @@ impl ClientState {
                         if !members.contains(&added_rid) {
                             members.push(added_rid.clone());
                         }
-                        self.log(format!(
+                        self.log_for_group(
+                            &group_id,
+                            format!(
                             "{} added {} to group {}.",
                             from_rid,
                             added_rid,
                             short_group_id(&group_id)
-                        ));
+                        ),
+                        );
                     } else {
-                        self.log(format!(
+                        self.log_for_group(
+                            &group_id,
+                            format!(
                             "Processed group commit from {} for group {}.",
                             from_rid,
                             short_group_id(&group_id)
-                        ));
+                        ),
+                        );
                     }
                     self.save_persisted_state()?;
                 } else {
@@ -1227,11 +1266,21 @@ impl ClientState {
         Ok(true)
     }
 
-    fn log(&mut self, line: impl Into<String>) {
-        if self.activity.len() >= MAX_ACTIVITY {
-            let _ = self.activity.pop_front();
+    fn log_for_group(&mut self, group_id: &str, line: impl Into<String>) {
+        let activity = self
+            .activity_by_group
+            .entry(group_id.to_string())
+            .or_default();
+        if activity.len() >= MAX_ACTIVITY {
+            let _ = activity.pop_front();
         }
-        self.activity.push_back(line.into());
+        activity.push_back(line.into());
+    }
+
+    fn log(&mut self, line: impl Into<String>) {
+        if let Some(active_group_id) = self.active_group_id.clone() {
+            self.log_for_group(&active_group_id, line);
+        }
     }
 
     fn qualified_my_rid(&self) -> String {
