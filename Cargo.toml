@@ -23,4 +23,5 @@ sha2 = "0.10.9"
 tauri = { version = "2.10.3", features = [] }
 tls_codec = "0.4.2"
 runway-token = "0.1.0"
+librunway = { path = "../librunway" }
 zeroize = "1.8.2"

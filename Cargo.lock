@@ -102,6 +102,7 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "ed25519-dalek",
+ "librunway",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -2439,6 +2440,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1744e39d1d6a9948f4f388969627434e31128196de472883b39f148769bfe30a"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "librunway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_cbor",
+ "sha2",
 ]
 
 [[package]]
