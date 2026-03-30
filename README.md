@@ -1,7 +1,7 @@
 # Asphalt
 Asphalt is a client for the Runway protocol. It utilizes OpenMLS for its MLS implementation.
 <p float="left">
-  <img src="https://raw.githubusercontent.com/runwayproject/asphalt/refs/heads/main/screenshot.png" width="1000" />
+  <img src="https://raw.githubusercontent.com/runwayproject/desktop/refs/heads/main/screenshot.png" width="1000" />
 </p>
 ## Running the desktop app
 Install the frontend dependencies once:
