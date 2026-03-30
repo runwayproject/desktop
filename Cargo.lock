@@ -2447,6 +2447,8 @@ name = "librunway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
+ "rand 0.10.0",
  "serde",
  "serde_cbor",
  "sha2",

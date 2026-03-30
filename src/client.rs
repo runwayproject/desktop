@@ -1,13 +1,11 @@
 use anyhow::{Context, Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use asphalt::mls;
-use librunway::transport::{
-    ClientPacket, EncryptedBlob, RequestAuth, ServerPacket, auth_signing_payload, decode_packet,
-    encode_packet, read_framed, write_framed,
-};
+use librunway::relay_client::{fetch_queued, issue_rid, put_blob, rotate_rid};
+use librunway::transport::{EncryptedBlob, ServerPacket};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::SigningKey;
 use openmls::group::GroupId;
 use openmls::prelude::{KeyPackage, MlsGroup, MlsGroupJoinConfig, ProcessedMessageContent};
 use openmls_traits::OpenMlsProvider;
@@ -17,9 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
-use std::net::TcpStream;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::{Zeroize, Zeroizing};
 
 // consts
@@ -134,8 +130,7 @@ impl ClientState {
         let persistence_salt = random_persistence_salt();
         let state_key = derive_state_key(passphrase.as_str(), &persistence_salt)?;
 
-        let auth = make_auth(&signing_key, "issue_rid", b"");
-        let rid = match send_client_packet(&server_addr, ClientPacket::IssueRid { auth })? {
+        let rid = match issue_rid(&server_addr, &signing_key)? {
             ServerPacket::RidIssued { rid, .. } => rid,
             other => bail!("expected RidIssued response, got {other:#?}"),
         };
@@ -589,14 +584,7 @@ impl ClientState {
 
     pub fn rotate_rid(&mut self) -> Result<()> {
         let old_rid = self.my_rid.clone();
-        let auth = make_auth(&self.signing_key, "rotate_rid", old_rid.as_bytes());
-        let response = send_client_packet(
-            &self.server_addr,
-            ClientPacket::RotateRid {
-                rid: old_rid.clone(),
-                auth,
-            },
-        )?;
+        let response = rotate_rid(&self.server_addr, &self.signing_key, &old_rid)?;
 
         match response {
             ServerPacket::RidRotated { new_rid, .. } => {
@@ -698,7 +686,7 @@ impl ClientState {
             };
 
             let blob = EncryptedBlob::new(endpoint.rid.clone(), ciphertext.clone());
-            match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
+            match put_blob(&endpoint.relay, blob)? {
                 ServerPacket::Accepted { .. } => {
                 }
                 ServerPacket::Error { message } => {
@@ -731,14 +719,7 @@ impl ClientState {
     }
 
     pub fn fetch_messages(&mut self, quiet_empty: bool) -> Result<()> {
-        let auth = make_auth(&self.signing_key, "fetch_queued", self.my_rid.as_bytes());
-        let response = send_client_packet(
-            &self.server_addr,
-            ClientPacket::FetchQueued {
-                rid: self.my_rid.clone(),
-                auth,
-            },
-        )?;
+        let response = fetch_queued(&self.server_addr, &self.signing_key, &self.my_rid)?;
 
         match response {
             ServerPacket::QueuedBlobs { blobs, .. } => {
@@ -1075,7 +1056,7 @@ impl ClientState {
             serde_cbor::to_vec(&envelope).context("encoding bootstrap envelope failed")?;
         let endpoint = resolve_recipient_endpoint(&recipient_rid, &self.server_addr)?;
         let blob = EncryptedBlob::new(endpoint.rid, payload);
-        match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
+        match put_blob(&endpoint.relay, blob)? {
             ServerPacket::Accepted { .. } => Ok(()),
             ServerPacket::Error { message } => Err(anyhow::anyhow!(message)),
             other => Err(anyhow::anyhow!(
@@ -1085,8 +1066,7 @@ impl ClientState {
     }
 
     fn issue_new_rid(&mut self, old_rid: String) -> Result<()> {
-        let auth = make_auth(&self.signing_key, "issue_rid", b"");
-        let response = send_client_packet(&self.server_addr, ClientPacket::IssueRid { auth })?;
+        let response = issue_rid(&self.server_addr, &self.signing_key)?;
 
         match response {
             ServerPacket::RidIssued { rid, .. } => {
@@ -1200,7 +1180,7 @@ impl ClientState {
                     }
                 };
                 let blob = EncryptedBlob::new(endpoint.rid, ciphertext.clone());
-                match send_client_packet(&endpoint.relay, ClientPacket::PutBlob { blob })? {
+                match put_blob(&endpoint.relay, blob)? {
                     ServerPacket::Accepted { .. } => {}
                     ServerPacket::Error { message } => {
                         self.log(format!(
@@ -1539,38 +1519,6 @@ fn random_persistence_salt() -> Vec<u8> {
     salt
 }
 
-fn make_auth(signing_key: &SigningKey, action: &str, body: &[u8]) -> RequestAuth {
-    let mut nonce = [0_u8; 16];
-    rand::rng().fill(&mut nonce);
-
-    let mut auth = RequestAuth {
-        credential_public_key: signing_key.verifying_key().to_bytes().to_vec(),
-        nonce: nonce.to_vec(),
-        signed_at_unix_ms: unix_ms_now(),
-        signature: Vec::new(),
-    };
-
-    let payload = auth_signing_payload(action, body, &auth);
-    auth.signature = signing_key.sign(&payload).to_bytes().to_vec();
-    auth
-}
-
-fn send_client_packet(addr: &str, packet: ClientPacket) -> Result<ServerPacket> {
-    let mut stream = TcpStream::connect(addr).with_context(|| format!("connect to {}", addr))?;
-    let bytes = encode_packet(&packet)?;
-    write_framed(&mut stream, &bytes)?;
-    let frame = read_framed(&mut stream, 2 * 1024 * 1024)?;
-    let response: ServerPacket = decode_packet(&frame)?;
-    Ok(response)
-}
-
 fn is_rid_missing_error(message: &str) -> bool {
     message.contains("loading rid owner failed") || message.contains("unknown or expired rid")
-}
-
-fn unix_ms_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
