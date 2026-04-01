@@ -54,7 +54,13 @@ const state = {
     toastTimer: null,
     inviteFormOpen: false,
     openMenu: null,
+    activitySignature: null,
 };
+
+function computeActivitySignature(activity) {
+    if (!Array.isArray(activity) || activity.length === 0) return '__EMPTY__';
+    return `${activity.length}:${activity.join('\u001f')}`;
+}
 
 function showToast(message) {
     if (!elements.toast) return;
@@ -150,9 +156,15 @@ function renderPeers(snapshot) {
 }
 
 function renderActivity(snapshot) {
+    const nextSignature = computeActivitySignature(snapshot?.activity);
+    if (state.activitySignature === nextSignature) {
+        return;
+    }
+
     if (!snapshot || !Array.isArray(snapshot.activity) || snapshot.activity.length === 0) {
         elements.activityList.className = 'activity-list empty-state';
         elements.activityList.textContent = 'Messages and protocol events will appear here.';
+        state.activitySignature = nextSignature;
         return;
     }
 
@@ -166,6 +178,7 @@ function renderActivity(snapshot) {
         elements.activityList.append(item);
     });
 
+    state.activitySignature = nextSignature;
     elements.activityList.scrollTop = elements.activityList.scrollHeight;
 }
 
@@ -174,7 +187,12 @@ function renderStatus(snapshot) {
     if (elements.connectionSummary) elements.connectionSummary.textContent = `${snapshot.myRid}@${snapshot.serverAddr}`;
     if (elements.activeGroupTitle) elements.activeGroupTitle.textContent = snapshot.activeGroupTitle || 'No group selected';
 
-    if (elements.ridMenuLabel) elements.ridMenuLabel.textContent = `RID: ${snapshot.myRid}@${snapshot.serverAddr}`;
+    if (elements.ridMenuLabel) {
+        const ridText = `RID: ${snapshot.myRid}@${snapshot.serverAddr}`;
+        if (elements.ridMenuLabel.textContent !== ridText) {
+            elements.ridMenuLabel.textContent = ridText;
+        }
+    }
 
     if (elements.inviteBar) elements.inviteBar.hidden = !snapshot.pendingOfferFrom;
     if (snapshot.pendingOfferFrom && elements.inviteRid) elements.inviteRid.textContent = snapshot.pendingOfferFrom;
