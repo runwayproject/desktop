@@ -144,7 +144,6 @@ fn rotate_rid(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, Strin
     client.rotate_rid().map_err(|err| err.to_string())?;
     Ok(client.snapshot())
 }
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let server_addr = args
