@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use asphalt::mls;
-use librunway::relay_client::{fetch_queued, issue_rid, put_blob, rotate_rid};
+use librunway::relay_client::RelayClient;
 use librunway::transport::{EncryptedBlob, ServerPacket};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
@@ -30,7 +30,7 @@ const PERSISTENCE_KEY_LEN: usize = 32;
 
 pub struct ClientState {
     server_addr: String,
-    signing_key: SigningKey,
+    relay_client: RelayClient,
     my_rid: String,
     activity_by_group: HashMap<String, VecDeque<String>>,
     identity: mls::IdentityBundle,
@@ -129,15 +129,16 @@ impl ClientState {
         };
         let persistence_salt = random_persistence_salt();
         let state_key = derive_state_key(passphrase.as_str(), &persistence_salt)?;
+        let relay_client = RelayClient::new(server_addr.clone(), signing_key);
 
-        let rid = match issue_rid(&server_addr, &signing_key)? {
+        let rid = match relay_client.issue_rid()? {
             ServerPacket::RidIssued { rid, .. } => rid,
             other => bail!("expected RidIssued response, got {other:#?}"),
         };
 
         let mut state = Self {
             server_addr,
-            signing_key,
+            relay_client,
             my_rid: rid,
             activity_by_group: HashMap::new(),
             identity: mls::create_identity(),
@@ -281,10 +282,11 @@ impl ClientState {
                 pending_keypackages.contains_key(rid.as_str())
                     || pending_keypackage_requests.contains_key(rid.as_str())
             });
+        let relay_client = RelayClient::new(server_addr.clone(), signing_key);
 
         let mut state = Self {
             server_addr,
-            signing_key,
+            relay_client,
             my_rid: persisted.my_rid,
             activity_by_group,
             identity,
@@ -341,7 +343,7 @@ impl ClientState {
             version: PERSISTENCE_VERSION,
             server_addr: self.server_addr.clone(),
             my_rid: self.my_rid.clone(),
-            transport_signing_key: self.signing_key.to_bytes().to_vec(),
+            transport_signing_key: self.relay_client.signing_key().to_bytes().to_vec(),
             identity: extract_identity_bytes(&self.identity.credential_with_key),
             identity_signature_public_key: self.identity.signer.to_public_vec(),
             storage_values,
@@ -584,7 +586,7 @@ impl ClientState {
 
     pub fn rotate_rid(&mut self) -> Result<()> {
         let old_rid = self.my_rid.clone();
-        let response = rotate_rid(&self.server_addr, &self.signing_key, &old_rid)?;
+        let response = self.relay_client.rotate_rid(&old_rid)?;
 
         match response {
             ServerPacket::RidRotated { new_rid, .. } => {
@@ -686,7 +688,7 @@ impl ClientState {
             };
 
             let blob = EncryptedBlob::new(endpoint.rid.clone(), ciphertext.clone());
-            match put_blob(&endpoint.relay, blob)? {
+            match self.relay_client.put_blob(&endpoint.relay, blob)? {
                 ServerPacket::Accepted { .. } => {
                 }
                 ServerPacket::Error { message } => {
@@ -719,7 +721,7 @@ impl ClientState {
     }
 
     pub fn fetch_messages(&mut self, quiet_empty: bool) -> Result<()> {
-        let response = fetch_queued(&self.server_addr, &self.signing_key, &self.my_rid)?;
+        let response = self.relay_client.fetch_queued(&self.my_rid)?;
 
         match response {
             ServerPacket::QueuedBlobs { blobs, .. } => {
@@ -1056,7 +1058,7 @@ impl ClientState {
             serde_cbor::to_vec(&envelope).context("encoding bootstrap envelope failed")?;
         let endpoint = resolve_recipient_endpoint(&recipient_rid, &self.server_addr)?;
         let blob = EncryptedBlob::new(endpoint.rid, payload);
-        match put_blob(&endpoint.relay, blob)? {
+        match self.relay_client.put_blob(&endpoint.relay, blob)? {
             ServerPacket::Accepted { .. } => Ok(()),
             ServerPacket::Error { message } => Err(anyhow::anyhow!(message)),
             other => Err(anyhow::anyhow!(
@@ -1066,7 +1068,7 @@ impl ClientState {
     }
 
     fn issue_new_rid(&mut self, old_rid: String) -> Result<()> {
-        let response = issue_rid(&self.server_addr, &self.signing_key)?;
+        let response = self.relay_client.issue_rid()?;
 
         match response {
             ServerPacket::RidIssued { rid, .. } => {
@@ -1180,7 +1182,7 @@ impl ClientState {
                     }
                 };
                 let blob = EncryptedBlob::new(endpoint.rid, ciphertext.clone());
-                match put_blob(&endpoint.relay, blob)? {
+                match self.relay_client.put_blob(&endpoint.relay, blob)? {
                     ServerPacket::Accepted { .. } => {}
                     ServerPacket::Error { message } => {
                         self.log(format!(
