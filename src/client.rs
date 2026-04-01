@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
-use asphalt::mls;
+use librunway::mls;
 use librunway::relay_client::RelayClient;
 use librunway::transport::{EncryptedBlob, ServerPacket};
 use chacha20poly1305::aead::{Aead, KeyInit};
