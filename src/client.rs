@@ -39,6 +39,7 @@ pub struct ClientState {
     pending_keypackages: HashMap<String, KeyPackage>,
     pending_keypackage_requests: HashMap<String, KeyPackage>,
     pending_group_additions: HashMap<String, String>,
+    pending_group_leaves: HashMap<String, String>,
     pending_offer_from: Option<String>,
     active_group_id: Option<String>,
     persistence_salt: Vec<u8>,
@@ -147,6 +148,7 @@ impl ClientState {
             pending_keypackages: HashMap::new(),
             pending_keypackage_requests: HashMap::new(),
             pending_group_additions: HashMap::new(),
+            pending_group_leaves: HashMap::new(),
             pending_offer_from: None,
             active_group_id: None,
             persistence_salt,
@@ -295,6 +297,7 @@ impl ClientState {
             pending_keypackages,
             pending_keypackage_requests,
             pending_group_additions,
+            pending_group_leaves: HashMap::new(),
             pending_offer_from,
             active_group_id,
             persistence_salt: encrypted.salt,
@@ -550,6 +553,7 @@ impl ClientState {
                     from_rid: self.qualified_my_rid(),
                     group_id: group_id.clone(),
                     added_rid: Some(member_rid.clone()),
+                    removed_rid: None,
                     commit: commit_bytes.clone(),
                 },
             };
@@ -574,6 +578,66 @@ impl ClientState {
         }
 
         self.active_group_id = Some(group_id.clone());
+        self.save_persisted_state()?;
+        Ok(())
+    }
+
+    pub fn leave_group(&mut self) -> Result<()> {
+        // make sure a group is selected
+        let group_id = self
+            .active_group_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no active group selected"))?;
+
+        let my_rid = self.qualified_my_rid();
+
+        // which peers will get the leave message
+        let recipients = self
+            .conversation_members
+            .get(&group_id)
+            .cloned()
+            .unwrap_or_else(|| vec![my_rid.clone()])
+            .into_iter()
+            .filter(|rid| !self.rid_matches_self(rid))
+            .collect::<Vec<_>>();
+
+        // generate the commit for leaving the group
+        let leave_proposal_bytes = {
+            let group = self
+                .conversations
+                .get_mut(&group_id)
+                .with_context(|| format!("no local group for {}", short_group_id(&group_id)))?;
+            let leave_proposal =
+                mls::leave_group_and_get_commit(group, &self.identity.provider, &self.identity.signer)?;
+            mls::mls_message_out_to_bytes(&leave_proposal)?
+        };
+
+        // send the commit to the other members and the bootstrap message to trigger local state cleanup
+        for recipient in recipients {
+            let endpoint = resolve_recipient_endpoint(&recipient, &self.server_addr)?;
+            let blob = EncryptedBlob::new(endpoint.rid, leave_proposal_bytes.clone());
+            match self.relay_client.put_blob(&endpoint.relay, blob)? {
+                ServerPacket::Accepted { .. } => {}
+                ServerPacket::Error { message } => {
+                    bail!("server rejected leave proposal to {}: {}", recipient, message)
+                }
+                other => {
+                    bail!("unexpected response on leave proposal to {}: {other:#?}", recipient)
+                }
+            }
+
+            let envelope = BootstrapEnvelope {
+                magic: BOOTSTRAP_MAGIC,
+                payload: BootstrapPayload::GroupLeave {
+                    from_rid: my_rid.clone(),
+                    group_id: group_id.clone(),
+                },
+            };
+            self.send_bootstrap_envelope(envelope, recipient)?;
+        }
+
+        self.remove_group_local_state(&group_id);
+        self.log(format!("Left group {}.", short_group_id(&group_id)));
         self.save_persisted_state()?;
         Ok(())
     }
@@ -819,6 +883,7 @@ impl ClientState {
 
         let mut decrypted_line: Option<(String, String)> = None;
         let mut pending_rid_update: Option<(String, String, String)> = None;
+        let mut pending_proposal_group: Option<String> = None;
         for (group_id, group) in &mut self.conversations {
             let pm = match mls::bytes_to_protocol_message(&blob.ciphertext) {
                 Ok(pm) => pm,
@@ -847,6 +912,14 @@ impl ClientState {
                     }
                     String::from_utf8_lossy(&app_bytes).to_string()
                 }
+                ProcessedMessageContent::ProposalMessage(_) => {
+                    pending_proposal_group = Some(group_id.clone());
+                    "processed MLS proposal".to_string()
+                }
+                ProcessedMessageContent::ExternalJoinProposalMessage(_) => {
+                    pending_proposal_group = Some(group_id.clone());
+                    "processed MLS external proposal".to_string()
+                }
                 _ => "non-application MLS message".to_string(),
             };
 
@@ -867,6 +940,11 @@ impl ClientState {
                 ),
                 );
             }
+            return Ok(());
+        }
+
+        if let Some(group_id) = pending_proposal_group {
+            self.commit_pending_proposals_for_group(&group_id)?;
             return Ok(());
         }
 
@@ -962,6 +1040,7 @@ impl ClientState {
                 from_rid,
                 group_id,
                 added_rid,
+                removed_rid,
                 commit,
             } => {
                 let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
@@ -999,6 +1078,30 @@ impl ClientState {
                             short_group_id(&group_id)
                         ),
                         );
+                        // TODO: implement removing members
+                    } else if let Some(removed_rid) = removed_rid {
+                        let removed_rid = normalize_recipient_input(&removed_rid, &self.server_addr)?;
+                        if self.rid_matches_self(&removed_rid) {
+                            self.remove_group_local_state(&group_id);
+                            self.log(format!(
+                                "You were removed from group {} by {}.",
+                                short_group_id(&group_id),
+                                from_rid
+                            ));
+                        } else {
+                            if let Some(members) = self.conversation_members.get_mut(&group_id) {
+                                members.retain(|rid| rid.as_str() != removed_rid.as_str());
+                            }
+                            self.log_for_group(
+                                &group_id,
+                                format!(
+                                    "{} removed {} from group {}.",
+                                    from_rid,
+                                    removed_rid,
+                                    short_group_id(&group_id)
+                                ),
+                            );
+                        }
                     } else {
                         self.log_for_group(
                             &group_id,
@@ -1013,6 +1116,24 @@ impl ClientState {
                 } else {
                     bail!("received non-commit MLS payload in GroupCommit envelope")
                 }
+            }
+            BootstrapPayload::GroupLeave { from_rid, group_id } => {
+                let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
+                if self.rid_matches_self(&from_rid) {
+                    self.remove_group_local_state(&group_id);
+                    self.log(format!("You left group {}.", short_group_id(&group_id)));
+                } else {
+                    self.pending_group_leaves
+                        .insert(group_id.clone(), from_rid.clone());
+                    if let Some(members) = self.conversation_members.get_mut(&group_id) {
+                        members.retain(|rid| rid.as_str() != from_rid.as_str());
+                    }
+                    self.log_for_group(
+                        &group_id,
+                        format!("{} left group {}.", from_rid, short_group_id(&group_id)),
+                    );
+                }
+                self.save_persisted_state()?;
             }
         }
         Ok(())
@@ -1248,6 +1369,22 @@ impl ClientState {
         Ok(true)
     }
 
+    fn remove_group_local_state(&mut self, group_id: &str) {
+        let was_active = self.active_group_id.as_deref() == Some(group_id);
+        self.conversations.remove(group_id);
+        self.conversation_members.remove(group_id);
+        self.activity_by_group.remove(group_id);
+        self.pending_group_leaves.remove(group_id);
+        self.pending_group_additions
+            .retain(|_, pending_group_id| pending_group_id != group_id);
+
+        if was_active {
+            let mut remaining = self.conversations.keys().cloned().collect::<Vec<_>>();
+            remaining.sort();
+            self.active_group_id = remaining.into_iter().next();
+        }
+    }
+
     fn log_for_group(&mut self, group_id: &str, line: impl Into<String>) {
         let activity = self
             .activity_by_group
@@ -1275,6 +1412,55 @@ impl ClientState {
 
     fn build_self_token(&self) -> String {
         format!("runway::v1::{}", self.qualified_my_rid())
+    }
+
+    // this is called after receiving a proposal message
+    fn commit_pending_proposals_for_group(&mut self, group_id: &str) -> Result<()> {
+        let commit = {
+            let Some(group) = self.conversations.get_mut(group_id) else {
+                return Ok(());
+            };
+            mls::commit_pending_proposals_and_merge(
+                group,
+                &self.identity.provider,
+                &self.identity.signer,
+            )?
+        };
+
+        let commit_bytes = mls::mls_message_out_to_bytes(&commit)?;
+        let removed_rid = self.pending_group_leaves.get(group_id).cloned();
+        let recipients = self
+            .conversation_members
+            .get(group_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|rid| !self.rid_matches_self(rid))
+            .collect::<Vec<_>>();
+
+        for recipient in recipients {
+            if let Some(removed_rid) = &removed_rid
+                && recipient.as_str() == removed_rid.as_str()
+            {
+                continue;
+            }
+
+            let envelope = BootstrapEnvelope {
+                magic: BOOTSTRAP_MAGIC,
+                payload: BootstrapPayload::GroupCommit {
+                    from_rid: self.qualified_my_rid(),
+                    group_id: group_id.to_string(),
+                    added_rid: None,
+                    removed_rid: removed_rid.clone(),
+                    commit: commit_bytes.clone(),
+                },
+            };
+            self.send_bootstrap_envelope(envelope, recipient)?;
+        }
+
+        self.pending_group_leaves.remove(group_id);
+        self.save_persisted_state()?;
+        Ok(())
     }
 }
 
@@ -1304,7 +1490,12 @@ enum BootstrapPayload {
         from_rid: String,
         group_id: String,
         added_rid: Option<String>,
+        removed_rid: Option<String>,
         commit: Vec<u8>,
+    },
+    GroupLeave {
+        from_rid: String,
+        group_id: String,
     },
 }
 

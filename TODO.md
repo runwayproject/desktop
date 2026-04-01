@@ -13,4 +13,4 @@
 - show group name
 - set nicknames for members
 - multiple identities
-- leave groups feature
+- remove member from group feature

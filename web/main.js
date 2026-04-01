@@ -290,7 +290,7 @@ if (elements.inviteMemberMenuItem) elements.inviteMemberMenuItem.addEventListene
     if (state.inviteFormOpen) elements.memberRidInput.focus();
 });
 if (elements.clearActivityMenuItem) elements.clearActivityMenuItem.addEventListener('click', () => { closeAllMenus(); void invokeCommand('clear_activity'); });
-if (elements.leaveGroupMenuItem) elements.leaveGroupMenuItem.addEventListener('click', () => { closeAllMenus(); showToast('Leave group not yet implemented.'); });
+if (elements.leaveGroupMenuItem) elements.leaveGroupMenuItem.addEventListener('click', () => { closeAllMenus(); void invokeCommand('leave_group'); });
 
 if (elements.refreshMenuItem) elements.refreshMenuItem.addEventListener('click', () => { closeAllMenus(); void invokeCommand('fetch_messages', { quietEmpty: false }); });
 

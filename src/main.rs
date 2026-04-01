@@ -102,6 +102,16 @@ fn select_group(
 }
 
 #[tauri::command]
+fn leave_group(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, String> {
+    let mut client = state
+        .client
+        .lock()
+        .map_err(|_| "client state lock poisoned".to_string())?;
+    client.leave_group().map_err(|err| err.to_string())?;
+    Ok(client.snapshot())
+}
+
+#[tauri::command]
 fn accept_pending_offer(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, String> {
     let mut client = state
         .client
@@ -171,6 +181,7 @@ fn main() {
             create_group,
             add_member,
             select_group,
+            leave_group,
             accept_pending_offer,
             reject_pending_offer,
             clear_activity,
