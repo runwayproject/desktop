@@ -36,6 +36,7 @@ pub struct ClientState {
     identity: mls::IdentityBundle,
     conversations: HashMap<String, openmls::group::MlsGroup>,
     conversation_members: HashMap<String, Vec<String>>,
+    conversation_is_direct: HashMap<String, bool>,
     pending_keypackages: HashMap<String, KeyPackage>,
     pending_keypackage_requests: HashMap<String, KeyPackage>,
     pending_group_additions: HashMap<String, String>,
@@ -63,6 +64,8 @@ struct PersistedClientState {
     storage_values: HashMap<Vec<u8>, Vec<u8>>,
     conversation_group_ids: HashMap<String, Vec<u8>>,
     conversation_members: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    conversation_is_direct: HashMap<String, bool>,
     activity_by_group: HashMap<String, Vec<String>>,
     active_group_id: Option<String>,
     pending_keypackages: HashMap<String, Vec<u8>>,
@@ -86,6 +89,7 @@ pub struct ConversationSummary {
     pub group_id: String,
     pub title: String,
     pub member_count: usize,
+    pub is_direct: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +100,7 @@ pub struct ClientSnapshot {
     pub my_token: String,
     pub active_group_id: Option<String>,
     pub active_group_title: String,
+    pub active_group_is_direct: bool,
     pub pending_offer_from: Option<String>,
     pub conversations: Vec<ConversationSummary>,
     pub activity: Vec<String>,
@@ -145,6 +150,7 @@ impl ClientState {
             identity: mls::create_identity(),
             conversations: HashMap::new(),
             conversation_members: HashMap::new(),
+            conversation_is_direct: HashMap::new(),
             pending_keypackages: HashMap::new(),
             pending_keypackage_requests: HashMap::new(),
             pending_group_additions: HashMap::new(),
@@ -235,6 +241,13 @@ impl ClientState {
             conversation_members.insert(group_id, normalized_members);
         }
 
+        let mut conversation_is_direct: HashMap<String, bool> = HashMap::new();
+        for (group_id, is_direct) in persisted.conversation_is_direct {
+            if conversations.contains_key(group_id.as_str()) {
+                conversation_is_direct.insert(group_id, is_direct);
+            }
+        }
+
         let mut activity_by_group: HashMap<String, VecDeque<String>> = HashMap::new();
         for (group_id, activity) in persisted.activity_by_group {
             if conversations.contains_key(group_id.as_str()) {
@@ -294,6 +307,7 @@ impl ClientState {
             identity,
             conversations,
             conversation_members,
+            conversation_is_direct,
             pending_keypackages,
             pending_keypackage_requests,
             pending_group_additions,
@@ -352,6 +366,7 @@ impl ClientState {
             storage_values,
             conversation_group_ids,
             conversation_members: self.conversation_members.clone(),
+            conversation_is_direct: self.conversation_is_direct.clone(),
             activity_by_group,
             active_group_id: self.active_group_id.clone(),
             pending_keypackages: pending_keypackages_bytes,
@@ -393,6 +408,12 @@ impl ClientState {
             .map(|group_id| self.conversation_title(group_id))
             .unwrap_or_else(|| "No group selected".to_string());
 
+        let active_group_is_direct = self
+            .active_group_id
+            .as_ref()
+            .map(|group_id| self.is_direct_conversation(group_id))
+            .unwrap_or(false);
+
         let activity = self
             .active_group_id
             .as_ref()
@@ -406,6 +427,7 @@ impl ClientState {
             my_token: self.build_self_token(),
             active_group_id: self.active_group_id.clone(),
             active_group_title,
+            active_group_is_direct,
             pending_offer_from: self.pending_offer_from.clone(),
             conversations: self.sorted_conversations(),
             activity,
@@ -419,13 +441,31 @@ impl ClientState {
         self.conversations.insert(group_id.clone(), group);
         self.conversation_members
             .insert(group_id.clone(), vec![self.qualified_my_rid()]);
+        self.conversation_is_direct.insert(group_id.clone(), false);
         self.active_group_id = Some(group_id.clone());
         self.log(format!(
-            "Created group {}. Invite members from the Groups view.",
+            "Created group {}. Invite members from the Conversations view.",
             short_group_id(&group_id)
         ));
         self.save_persisted_state()?;
         Ok(())
+    }
+
+    pub fn create_direct_message(&mut self, target: String) -> Result<()> {
+        let target = normalize_recipient_input(&target, &self.server_addr)?;
+        let group_id = self.allocate_group_id();
+        let group = mls::create_group(&self.identity);
+        self.conversations.insert(group_id.clone(), group);
+        self.conversation_members
+            .insert(group_id.clone(), vec![self.qualified_my_rid()]);
+        self.conversation_is_direct.insert(group_id.clone(), true);
+        self.active_group_id = Some(group_id.clone());
+        self.log(format!(
+            "Created direct message {}.",
+            short_group_id(&group_id)
+        ));
+        self.save_persisted_state()?;
+        self.add_member_to_group(group_id, target)
     }
 
     pub fn add_peer(&mut self, target_rid: String) -> Result<()> {
@@ -454,14 +494,34 @@ impl ClientState {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no active group selected"))?;
 
-        if let Some(members) = self.conversation_members.get(&active)
+        self.add_member_to_group(active, member_rid)
+    }
+
+    fn add_member_to_group(&mut self, group_id: String, member_rid: String) -> Result<()> {
+        if let Some(members) = self.conversation_members.get(&group_id)
             && members.contains(&member_rid)
         {
             bail!(
                 "{} is already a member of group {}",
                 member_rid,
-                short_group_id(&active)
+                short_group_id(&group_id)
             )
+        }
+
+        if self.is_direct_conversation(&group_id) {
+            let other_count = self
+                .conversation_members
+                .get(&group_id)
+                .map(|members| {
+                    members
+                        .iter()
+                        .filter(|rid| !self.rid_matches_self(rid))
+                        .count()
+                })
+                .unwrap_or(0);
+            if other_count >= 1 && !self.rid_matches_self(&member_rid) {
+                bail!("direct messages only support one other member")
+            }
         }
 
         let maybe_kp = self.pending_keypackages.remove(&member_rid);
@@ -470,7 +530,7 @@ impl ClientState {
             Some(kp) => kp,
             None => {
                 self.pending_group_additions
-                    .insert(member_rid.clone(), active.clone());
+                    .insert(member_rid.clone(), group_id.clone());
                 let envelope = BootstrapEnvelope {
                     magic: BOOTSTRAP_MAGIC,
                     payload: BootstrapPayload::KeyPackageRequest {
@@ -482,13 +542,13 @@ impl ClientState {
                 self.log(format!(
                     "Requested a KeyPackage from {} for group {}. The member will be added when it arrives.",
                     member_rid,
-                    short_group_id(&active)
+                    short_group_id(&group_id)
                 ));
                 return Ok(());
             }
         };
 
-        self.finalize_add_member(active, member_rid, key_package)
+        self.finalize_add_member(group_id, member_rid, key_package)
     }
 
     fn finalize_add_member(
@@ -824,6 +884,7 @@ impl ClientState {
                     .get(&group_id)
                     .map(|members| members.len())
                     .unwrap_or(0),
+                is_direct: self.is_direct_conversation(&group_id),
                 group_id,
             })
             .collect::<Vec<_>>();
@@ -863,6 +924,7 @@ impl ClientState {
         self.conversations.insert(group_id.clone(), group);
         self.conversation_members
             .insert(group_id.clone(), vec![self.qualified_my_rid(), target.clone()]);
+        self.conversation_is_direct.insert(group_id.clone(), true);
         self.active_group_id = Some(group_id.clone());
         self.log(format!(
             "Created group {} and invited {}.",
@@ -1028,6 +1090,8 @@ impl ClientState {
                 self.conversations.insert(group_id.clone(), group);
                 self.conversation_members
                     .insert(group_id.clone(), normalized_members);
+                self.conversation_is_direct
+                    .insert(group_id.clone(), self.is_direct_membership(&group_id));
                 self.active_group_id = Some(group_id.clone());
                 self.log(format!(
                     "Joined group {} from {}. You can now chat.",
@@ -1045,15 +1109,38 @@ impl ClientState {
             } => {
                 let from_rid = normalize_recipient_input(&from_rid, &self.server_addr)?;
                 let pm = mls::bytes_to_protocol_message(&commit)?;
-                let updated_group = self
-                    .conversations
-                    .get_mut(&group_id)
-                    .with_context(|| format!("received commit for unknown group {}", group_id))?;
-
-                let processed = mls::receive_message(updated_group, &self.identity.provider, pm)?;
+                let processed = {
+                    let updated_group = self
+                        .conversations
+                        .get_mut(&group_id)
+                        .with_context(|| format!("received commit for unknown group {}", group_id))?;
+                    mls::receive_message(updated_group, &self.identity.provider, pm)?
+                };
                 if let ProcessedMessageContent::StagedCommitMessage(staged_commit) =
                     processed.into_content()
                 {
+                    // if direct, reject and close
+                    // peer could be compromised
+                    if self.is_direct_conversation(&group_id) && added_rid.is_some() {
+                        let added_label = added_rid
+                            .as_deref()
+                            .unwrap_or("unknown member");
+                        let short_id = short_group_id(&group_id);
+                        self.remove_group_local_state(&group_id);
+                        self.log(format!(
+                            "Direct message {} rejected an add of {} by {} and was closed.",
+                            short_id,
+                            added_label,
+                            from_rid
+                        ));
+                        self.save_persisted_state()?;
+                        return Ok(());
+                    }
+
+                    let updated_group = self
+                        .conversations
+                        .get_mut(&group_id)
+                        .with_context(|| format!("received commit for unknown group {}", group_id))?;
                     mls::merge_staged_commit(
                         updated_group,
                         &self.identity.provider,
@@ -1146,6 +1233,20 @@ impl ClientState {
                 return candidate;
             }
         }
+    }
+
+    fn is_direct_conversation(&self, group_id: &str) -> bool {
+        self.conversation_is_direct
+            .get(group_id)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn is_direct_membership(&self, group_id: &str) -> bool {
+        self.conversation_members
+            .get(group_id)
+            .map(|members| members.len() <= 2)
+            .unwrap_or(false)
     }
 
     fn conversation_title(&self, group_id: &str) -> String {
@@ -1373,6 +1474,7 @@ impl ClientState {
         let was_active = self.active_group_id.as_deref() == Some(group_id);
         self.conversations.remove(group_id);
         self.conversation_members.remove(group_id);
+        self.conversation_is_direct.remove(group_id);
         self.activity_by_group.remove(group_id);
         self.pending_group_leaves.remove(group_id);
         self.pending_group_additions

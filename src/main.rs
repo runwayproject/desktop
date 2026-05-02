@@ -72,6 +72,21 @@ fn create_group(state: tauri::State<'_, AppState>) -> Result<ClientSnapshot, Str
 }
 
 #[tauri::command]
+fn create_direct_message(
+    state: tauri::State<'_, AppState>,
+    target: String,
+) -> Result<ClientSnapshot, String> {
+    let mut client = state
+        .client
+        .lock()
+        .map_err(|_| "client state lock poisoned".to_string())?;
+    client
+        .create_direct_message(target)
+        .map_err(|err| err.to_string())?;
+    Ok(client.snapshot())
+}
+
+#[tauri::command]
 fn add_member(
     state: tauri::State<'_, AppState>,
     member_rid: String,
@@ -179,6 +194,7 @@ fn main() {
             send_message,
             add_peer,
             create_group,
+            create_direct_message,
             add_member,
             select_group,
             leave_group,

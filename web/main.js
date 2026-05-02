@@ -40,6 +40,7 @@ const elements = {
     quitMenuItem: document.querySelector('#quitMenuItem'),
 
     newGroupMenuItem: document.querySelector('#newGroupMenuItem'),
+    newDirectMessageMenuItem: document.querySelector('#newDirectMessageMenuItem'),
     inviteMemberMenuItem: document.querySelector('#inviteMemberMenuItem'),
     clearActivityMenuItem: document.querySelector('#clearActivityMenuItem'),
     leaveGroupMenuItem: document.querySelector('#leaveGroupMenuItem'),
@@ -126,7 +127,7 @@ function renderPeers(snapshot) {
     if (!snapshot || !Array.isArray(snapshot.conversations) || snapshot.conversations.length === 0) {
         if (elements.peerList) {
             elements.peerList.className = 'peer-list empty-state';
-            elements.peerList.textContent = 'No groups yet.';
+            elements.peerList.textContent = 'No conversations yet.';
         }
         return;
     }
@@ -145,7 +146,9 @@ function renderPeers(snapshot) {
 
         const meta = document.createElement('span');
         meta.className = 'peer-pill-meta';
-        meta.textContent = `${conversation.groupId.slice(0, 8)} · ${conversation.memberCount} member${conversation.memberCount === 1 ? '' : 's'}`;
+        const isDirect = Boolean(conversation.isDirect);
+        const typeLabel = isDirect ? 'direct' : 'group';
+        meta.textContent = `${conversation.groupId.slice(0, 8)} · ${typeLabel} · ${conversation.memberCount} member${conversation.memberCount === 1 ? '' : 's'}`;
 
         button.append(title, meta);
         button.addEventListener('click', () => {
@@ -185,7 +188,11 @@ function renderActivity(snapshot) {
 function renderStatus(snapshot) {
     if (!snapshot) return;
     if (elements.connectionSummary) elements.connectionSummary.textContent = `${snapshot.myRid}@${snapshot.serverAddr}`;
-    if (elements.activeGroupTitle) elements.activeGroupTitle.textContent = snapshot.activeGroupTitle || 'No group selected';
+    if (elements.activeGroupTitle) {
+        const baseTitle = snapshot.activeGroupTitle || 'No group selected';
+        const suffix = snapshot.activeGroupIsDirect && snapshot.activeGroupId ? ' (direct)' : '';
+        elements.activeGroupTitle.textContent = `${baseTitle}${suffix}`;
+    }
 
     if (elements.ridMenuLabel) {
         const ridText = `RID: ${snapshot.myRid}@${snapshot.serverAddr}`;
@@ -197,15 +204,18 @@ function renderStatus(snapshot) {
     if (elements.inviteBar) elements.inviteBar.hidden = !snapshot.pendingOfferFrom;
     if (snapshot.pendingOfferFrom && elements.inviteRid) elements.inviteRid.textContent = snapshot.pendingOfferFrom;
 
-    if (elements.sendButton) elements.sendButton.disabled = !snapshot.activeGroupId;
-    if (elements.addMemberButton) elements.addMemberButton.disabled = !snapshot.activeGroupId;
-    if (elements.memberRidInput) elements.memberRidInput.disabled = !snapshot.activeGroupId;
+    const memberCount = Array.isArray(snapshot.members) ? snapshot.members.length : 0;
+    const canInvite = Boolean(snapshot.activeGroupId) && !(snapshot.activeGroupIsDirect && memberCount >= 2);
 
-    if (elements.inviteMemberMenuItem) elements.inviteMemberMenuItem.disabled = !snapshot.activeGroupId;
+    if (elements.sendButton) elements.sendButton.disabled = !snapshot.activeGroupId;
+    if (elements.addMemberButton) elements.addMemberButton.disabled = !canInvite;
+    if (elements.memberRidInput) elements.memberRidInput.disabled = !canInvite;
+
+    if (elements.inviteMemberMenuItem) elements.inviteMemberMenuItem.disabled = !canInvite;
     if (elements.clearActivityMenuItem) elements.clearActivityMenuItem.disabled = !snapshot.activeGroupId;
     if (elements.leaveGroupMenuItem) elements.leaveGroupMenuItem.disabled = !snapshot.activeGroupId;
 
-    if (!snapshot.activeGroupId) state.inviteFormOpen = false;
+    if (!canInvite) state.inviteFormOpen = false;
     if (elements.addMemberForm) elements.addMemberForm.classList.toggle('hidden', !state.inviteFormOpen);
 }
 
@@ -281,10 +291,22 @@ if (elements.quitMenuItem) elements.quitMenuItem.addEventListener('click', () =>
 
 if (elements.aboutMenuItem) elements.aboutMenuItem.addEventListener('click', () => { closeAllMenus(); showAbout(); });
 
+if (elements.newDirectMessageMenuItem) elements.newDirectMessageMenuItem.addEventListener('click', async () => {
+    closeAllMenus();
+    const target = window.prompt('Token or RID for the direct message:');
+    if (!target) return;
+    const cleanedTarget = target.trim();
+    if (!cleanedTarget) { showToast('Enter a token or RID first.'); return; }
+    await invokeCommand('create_direct_message', { target: cleanedTarget });
+});
 if (elements.newGroupMenuItem) elements.newGroupMenuItem.addEventListener('click', () => { closeAllMenus(); void invokeCommand('create_group'); });
 if (elements.inviteMemberMenuItem) elements.inviteMemberMenuItem.addEventListener('click', () => {
     closeAllMenus();
     if (!state.snapshot?.activeGroupId) { showToast('Select a group first.'); return; }
+    if (state.snapshot.activeGroupIsDirect && (state.snapshot.members?.length ?? 0) >= 2) {
+        showToast('Direct messages only support one other member.');
+        return;
+    }
     state.inviteFormOpen = !state.inviteFormOpen;
     elements.addMemberForm.classList.toggle('hidden', !state.inviteFormOpen);
     if (state.inviteFormOpen) elements.memberRidInput.focus();
@@ -302,6 +324,10 @@ if (elements.rejectInviteButton) elements.rejectInviteButton.addEventListener('c
 if (elements.addMemberForm) {
     elements.addMemberForm.addEventListener('submit', async (event) => {
         event.preventDefault();
+        if (state.snapshot?.activeGroupIsDirect && (state.snapshot.members?.length ?? 0) >= 2) {
+            showToast('Direct messages only support one other member.');
+            return;
+        }
         const memberRid = elements.memberRidInput.value.trim();
         if (!memberRid) { showToast('Enter a member RID first.'); return; }
         await invokeCommand('add_member', { memberRid });

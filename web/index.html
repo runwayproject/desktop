@@ -21,6 +21,7 @@
     <div class="menu-container">
       <button class="menu-trigger" id="groupMenuTrigger">Group</button>
       <div class="menu-dropdown" id="groupMenu" hidden>
+        <button class="menu-item" id="newDirectMessageMenuItem">New Direct Message...</button>
         <button class="menu-item" id="newGroupMenuItem">New Group</button>
         <button class="menu-item" id="inviteMemberMenuItem">Invite Member...</button>
         <div class="menu-separator"></div>
@@ -65,7 +66,7 @@
   <div class="chat-layout">
     <div class="chat-peers">
       <div class="list-header">
-        <div class="list-title">Groups</div>
+        <div class="list-title">Conversations</div>
       </div>
       <div id="peerList" class="peer-list"></div>
     </div>
@@ -79,7 +80,7 @@
         <button id="sendButton" type="submit">Send</button>
       </form>
       <form id="addMemberForm" class="members-invite-form hidden">
-        <input id="memberRidInput" type="text" placeholder="Token" autocomplete="off" />
+        <input id="memberRidInput" type="text" placeholder="Token or RID" autocomplete="off" />
         <button id="addMemberButton" type="submit">Send</button>
       </form>
     </div>
